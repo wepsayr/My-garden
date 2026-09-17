@@ -8,7 +8,6 @@
     <link rel="manifest" href="/static/manifest.json">
     <meta name="theme-color" content="#4caf50">
     <style>
-        /* Баннер установки приложения */
         .install-banner {
             display: flex;
             align-items: center;
@@ -35,7 +34,6 @@
             padding: 0 5px;
             line-height: 1;
         }
-        /* Модальное окно с инструкцией */
         .modal-overlay {
             display: none;
             position: fixed;
@@ -62,12 +60,8 @@
             margin-top: 0;
             color: var(--primary-dark);
         }
-        .modal-content ol {
-            padding-left: 20px;
-        }
-        .modal-content li {
-            margin-bottom: 8px;
-        }
+        .modal-content ol { padding-left: 20px; }
+        .modal-content li { margin-bottom: 8px; }
         .modal-close {
             display: block;
             margin: 20px auto 0;
@@ -79,7 +73,6 @@
             font-weight: 600;
             cursor: pointer;
         }
-        /* Кнопки поддержки и уведомлений */
         .action-buttons {
             display: flex;
             gap: 10px;
@@ -103,18 +96,135 @@
             background: #bdbdbd;
             cursor: not-allowed;
         }
+
+        /* Погода */
+        .weather-box {
+            background: linear-gradient(135deg, #bbdefb, #e3f2fd);
+            border-radius: 16px;
+            padding: 15px;
+            margin-bottom: 20px;
+            color: #0d47a1;
+        }
+        .weather-title {
+            font-weight: 600;
+            margin-bottom: 10px;
+            font-size: 1em;
+        }
+        .weather-days {
+            display: flex;
+            gap: 8px;
+            justify-content: space-between;
+        }
+        .weather-day {
+            flex: 1;
+            background: rgba(255,255,255,0.7);
+            border-radius: 12px;
+            padding: 10px 5px;
+            text-align: center;
+            font-size: 0.85em;
+        }
+        .weather-day .wd-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .weather-day .wd-icon {
+            font-size: 1.4em;
+            margin: 4px 0;
+        }
+        .weather-day .wd-temp {
+            font-weight: 600;
+        }
+        .weather-advice {
+            margin-top: 10px;
+            background: rgba(255,255,255,0.8);
+            border-radius: 10px;
+            padding: 10px;
+            font-size: 0.9em;
+        }
+        .weather-advice div { margin: 4px 0; }
+
+        /* Серия */
+        .streak-box {
+            background: linear-gradient(135deg, #ffecb3, #fff8e1);
+            border-radius: 16px;
+            padding: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+            color: #e65100;
+        }
+        .streak-box .flame {
+            font-size: 2.4em;
+            line-height: 1;
+        }
+        .streak-box .streak-num {
+            font-size: 2em;
+            font-weight: 700;
+            margin: 5px 0;
+        }
+        .streak-box .streak-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+        .streak-box .streak-best {
+            font-size: 0.85em;
+            margin-top: 5px;
+            opacity: 0.8;
+        }
     </style>
 </head>
 <body class="theme-{{ user.theme }}">
     <div class="container">
-        <!-- Баннер установки приложения (управляется серверным флагом) -->
         <div class="install-banner" id="installBanner" style="display: {% if user.install_banner_closed %}none{% else %}flex{% endif %};">
             <span class="text">🌱 Наш сайт можно сделать приложением! Нажми, чтобы узнать как</span>
             <button class="close-btn" id="closeBanner" title="Закрыть">×</button>
         </div>
 
         <h1>🌿 Мой сад</h1>
-        <p class="subtitle">Твой сад сегодня</p>
+        <p class="subtitle">
+            {% if user.name %}Привет, {{ user.name }}!{% else %}Твой сад сегодня{% endif %}
+        </p>
+
+        <!-- Серия -->
+        {% if user.current_streak and user.current_streak > 0 %}
+        <div class="streak-box">
+            <div class="flame">🔥</div>
+            <div class="streak-num">{{ user.current_streak }} {{ 'день' if user.current_streak % 10 == 1 and user.current_streak % 100 != 11 else ('дня' if user.current_streak % 10 in [2,3,4] and user.current_streak % 100 not in [12,13,14] else 'дней') }}</div>
+            <div class="streak-label">подряд ты заботишься о саде</div>
+            {% if user.best_streak and user.best_streak > user.current_streak %}
+            <div class="streak-best">🏆 Лучшая серия: {{ user.best_streak }}</div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <!-- Погода -->
+        {% if weather %}
+        <div class="weather-box">
+            <div class="weather-title">☁️ Погода{% if user.city %} в {{ user.city }}{% endif %}</div>
+            <div class="weather-days">
+                {% for day in weather %}
+                <div class="weather-day">
+                    <div class="wd-name">
+                        {% if loop.index == 1 %}Сегодня
+                        {% elif loop.index == 2 %}Завтра
+                        {% else %}
+                            {% set wd = day.date %}
+                            {{ wd[-5:] }}
+                        {% endif %}
+                    </div>
+                    <div class="wd-icon">{{ day.desc.split(' ')[0] }}</div>
+                    <div class="wd-temp">{{ day.tmax|round(0)|int }}° / {{ day.tmin|round(0)|int }}°</div>
+                </div>
+                {% endfor %}
+            </div>
+            {% if weather_advice %}
+            <div class="weather-advice">
+                {% for adv in weather_advice %}
+                <div>{{ adv }}</div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
 
         <!-- Задачи на сегодня -->
         <h2>Сегодня нужно</h2>
@@ -199,19 +309,16 @@
     </div>
 
     <script>
-        // Регистрация Service Worker
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/static/sw.js').catch(() => {});
         }
 
-        // Закрытие баннера (с отправкой на сервер)
         document.getElementById('closeBanner').addEventListener('click', function(e) {
             e.stopPropagation();
             document.getElementById('installBanner').style.display = 'none';
             fetch('/close_install_banner', { method: 'POST' });
         });
 
-        // Клик по баннеру открывает инструкцию
         document.getElementById('installBanner').addEventListener('click', function() {
             document.getElementById('installModal').style.display = 'flex';
         });
@@ -220,7 +327,6 @@
             document.getElementById('installModal').style.display = 'none';
         }
 
-        // Уведомления
         function requestNotificationPermission() {
             if (!('Notification' in window)) {
                 alert('Уведомления не поддерживаются этим браузером');
@@ -239,7 +345,6 @@
             });
         }
 
-        // Проверяем текущий статус уведомлений
         if ('Notification' in window) {
             const btn = document.getElementById('notificationToggleBtn');
             if (Notification.permission === 'granted') {
@@ -251,7 +356,6 @@
             }
         }
 
-        // Напоминание о задачах при загрузке страницы
         {% if tasks %}
             if (Notification.permission === 'granted') {
                 setTimeout(() => {
