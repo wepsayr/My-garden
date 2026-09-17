@@ -35,6 +35,13 @@
                 Нужен, чтобы можно было восстановить пароль
             </p>
 
+            <label>Город:
+                <input type="text" name="city" value="{{ user.city or '' }}" placeholder="Например, Москва">
+            </label>
+            <p style="font-size:0.8em; color:gray; margin-top:-5px;">
+                Чтобы показывать погоду и советы по поливу
+            </p>
+
             <label>Тема оформления:
                 <select name="theme">
                     <option value="green"  {% if user.theme == 'green' %}selected{% endif %}>Зелёная</option>
