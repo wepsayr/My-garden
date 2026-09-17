@@ -495,6 +495,17 @@ def dashboard():
     user = get_user()
     if not user:
         return redirect(url_for('login'))
+
+    # Страховка: если есть город, но нет координат — геокодируем прямо сейчас
+    if user['city'] and (not user['lat'] or not user['lon']):
+        lat, lon = geocode_city(user['city'])
+        if lat and lon:
+            execute('UPDATE users SET lat=%s, lon=%s WHERE id=%s', (lat, lon, user['id']))
+            user = get_user()
+            print(f"[GEOCODE] Город '{user['city']}' → {lat}, {lon}", flush=True)
+        else:
+            print(f"[GEOCODE] Не удалось найти город: '{user['city']}'", flush=True)
+
     tasks = get_today_tasks(user['id'])
     plants_count = len(get_user_plants(user['id']))
 
@@ -504,6 +515,8 @@ def dashboard():
     if user['lat'] and user['lon']:
         weather = get_weather_forecast(user['lat'], user['lon'])
         weather_advice = get_weather_advice(weather)
+        if not weather:
+            print(f"[WEATHER] Не удалось получить прогноз для lat={user['lat']}, lon={user['lon']}", flush=True)
 
     return render_template('index.html', user=user, tasks=tasks, plants_count=plants_count,
                            weather=weather, weather_advice=weather_advice)
