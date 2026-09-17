@@ -66,18 +66,18 @@ def execute(sql, args=(), returning=False):
         cur.close()
 
 
-# ---------- Отправка сообщений Telegram ----------
-def send_telegram_message(chat_id, text):
-    """Отправка сообщения через HTTP API Telegram (синхронно)."""
+# ---------- Telegram API ----------
+def send_telegram_message(chat_id, text, reply_markup=None):
+    """Отправка сообщения. reply_markup — словарь с inline_keyboard или др."""
     if not TELEGRAM_BOT_TOKEN:
         print("[TG] TELEGRAM_BOT_TOKEN не задан", flush=True)
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        r = requests.post(url, json={
-            "chat_id": chat_id,
-            "text": text,
-        }, timeout=10)
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        r = requests.post(url, json=payload, timeout=10)
         if r.status_code == 200:
             return True
         print(f"[TG] Ошибка отправки: {r.status_code} — {r.text[:300]}", flush=True)
@@ -85,6 +85,93 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"[TG] Исключение при отправке: {e}", flush=True)
         return False
+
+
+def edit_telegram_message(chat_id, message_id, text, reply_markup=None):
+    """Редактирует существующее сообщение."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        r = requests.post(url, json=payload, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[TG] Ошибка редактирования: {e}", flush=True)
+        return False
+
+
+def answer_callback(callback_query_id, text="", show_alert=False):
+    """Обязательный ответ на нажатие inline-кнопки."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+        requests.post(url, json={
+            "callback_query_id": callback_query_id,
+            "text": text,
+            "show_alert": show_alert,
+        }, timeout=10)
+    except Exception as e:
+        print(f"[TG] Ошибка answerCallback: {e}", flush=True)
+
+
+def get_user_by_telegram(chat_id):
+    return query('SELECT * FROM users WHERE telegram_id = %s', (chat_id,), one=True)
+
+
+def build_tasks_reply(user):
+    """Собирает текст и inline-кнопки для задач на сегодня."""
+    tasks = get_today_tasks(user['id'])
+    if not tasks:
+        return f"🌿 {user['name'] or 'Садовод'}, сегодня задач нет. Отдыхай!", None
+
+    lines = [f"🌿 {user['name'] or 'Садовод'}, задачи на сегодня:\n"]
+    keyboard = []
+    for task in tasks[:8]:  # ограничим 8 задач, чтобы не раздувать сообщение
+        icon = {'water': '💧', 'feed': '🧪', 'transplant': '🌱', 'harvest': '🧺'}.get(task['type'], '•')
+        lines.append(f"{icon} {task['message']}")
+        btn_text = {
+            'water': f"✅ Полить {task['plant_name']}",
+            'feed': f"✅ Подкормить {task['plant_name']}",
+            'transplant': f"✅ Пересадить {task['plant_name']}",
+            'harvest': f"✅ Собрать {task['plant_name']}",
+        }.get(task['type'], f"✅ {task['plant_name']}")
+        keyboard.append([{
+            "text": btn_text,
+            "callback_data": f"{task['type']}:{task['plant_id']}"
+        }])
+
+    reply_markup = {"inline_keyboard": keyboard}
+    return "\n".join(lines), reply_markup
+
+
+def build_garden_reply(user):
+    """Собирает текст со списком растений."""
+    plants = get_user_plants(user['id'])
+    if not plants:
+        return "🌱 У тебя пока нет растений. Добавь первое в приложении!"
+
+    lines = ["🌿 Твои растения:\n"]
+    for p in plants[:15]:
+        water_status = p['last_watered'] or 'ещё не поливали'
+        feed_status = p['last_fed'] or 'ещё не подкармливали'
+        lines.append(f"• <b>{p['name']}</b>")
+        lines.append(f"  💧 {water_status}")
+        lines.append(f"  🧪 {feed_status}")
+    return "\n".join(lines)
+
+
+def build_menu_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📋 Задачи на сегодня", "callback_data": "menu:tasks"}],
+            [{"text": "🌿 Мои растения", "callback_data": "menu:garden"}],
+            [{"text": "❓ Помощь", "callback_data": "menu:help"}],
+        ]
+    }
 
 
 # ---------- Инициализация БД ----------
@@ -562,6 +649,205 @@ CARE_TIPS = {
 }
 
 
+# ---------- Обработчики Telegram ----------
+def handle_telegram_message(message):
+    """Обработка входящего текстового сообщения."""
+    text = (message.get('text') or '').strip()
+    chat = message.get('chat') or {}
+    chat_id = chat.get('id')
+
+    if not chat_id or not text:
+        return
+
+    parts = text.split(maxsplit=1)
+    command = parts[0].lower()
+    if '@' in command:
+        command = command.split('@')[0]
+
+    if command == '/start':
+        if len(parts) > 1:
+            app_username = parts[1].strip().lower()
+            user = query('SELECT id, name FROM users WHERE LOWER(username) = %s',
+                         (app_username,), one=True)
+            if user:
+                execute('UPDATE users SET telegram_id = %s WHERE id = %s', (chat_id, user['id']))
+                name = user['name'] or app_username
+                send_telegram_message(
+                    chat_id,
+                    f"Привет, {name}! 🌿\n\n"
+                    f"Теперь я буду присылать тебе напоминания о поливе и подкормке.\n"
+                    f"Каждое утро в 8:00 жди сообщение с задачами.\n\n"
+                    f"Вот меню:",
+                    reply_markup=build_menu_keyboard()
+                )
+                print(f"[TG] Привязан chat_id={chat_id} к user_id={user['id']}", flush=True)
+                return
+            else:
+                send_telegram_message(
+                    chat_id,
+                    f"Не нашёл пользователя с логином «{app_username}».\n"
+                    f"Проверь логин в профиле приложения."
+                )
+                return
+        send_telegram_message(
+            chat_id,
+            "Привет! 🌿 Я бот приложения «Мой сад».\n\n"
+            "Открой приложение и нажми «Подключить Telegram» в профиле.",
+        )
+        return
+
+    # Для остальных команд нужен привязанный пользователь
+    user = get_user_by_telegram(chat_id)
+
+    if command == '/stop':
+        execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = %s', (chat_id,))
+        send_telegram_message(
+            chat_id,
+            "Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start."
+        )
+        return
+
+    if command == '/help':
+        send_telegram_message(
+            chat_id,
+            "🌿 Бот приложения «Мой сад»\n\n"
+            "Команды:\n"
+            "/start — приветствие и привязка\n"
+            "/tasks — задачи на сегодня\n"
+            "/garden — список растений\n"
+            "/stop — отключить напоминания\n"
+            "/help — эта справка"
+        )
+        return
+
+    if not user:
+        send_telegram_message(
+            chat_id,
+            "Твой Telegram ещё не привязан к аккаунту. Открой приложение → Профиль → «Подключить Telegram»."
+        )
+        return
+
+    if command == '/tasks':
+        text_msg, keyboard = build_tasks_reply(user)
+        send_telegram_message(chat_id, text_msg, reply_markup=keyboard)
+        return
+
+    if command == '/garden':
+        send_telegram_message(chat_id, build_garden_reply(user))
+        return
+
+    send_telegram_message(chat_id, "Не понимаю эту команду. Напиши /help, чтобы увидеть список команд.")
+
+
+def handle_telegram_callback(cb):
+    """Обработка нажатия inline-кнопки."""
+    cb_id = cb.get('id')
+    data = cb.get('data', '')
+    message = cb.get('message') or {}
+    chat = message.get('chat') or {}
+    chat_id = chat.get('id')
+    message_id = message.get('message_id')
+
+    if not chat_id or not data:
+        if cb_id:
+            answer_callback(cb_id)
+        return
+
+    user = get_user_by_telegram(chat_id)
+    if not user:
+        answer_callback(cb_id, "Аккаунт не привязан. Открой приложение → Профиль.", show_alert=True)
+        return
+
+    # Кнопки меню
+    if data == 'menu:tasks':
+        text_msg, keyboard = build_tasks_reply(user)
+        send_telegram_message(chat_id, text_msg, reply_markup=keyboard)
+        answer_callback(cb_id)
+        return
+
+    if data == 'menu:garden':
+        send_telegram_message(chat_id, build_garden_reply(user))
+        answer_callback(cb_id)
+        return
+
+    if data == 'menu:help':
+        send_telegram_message(
+            chat_id,
+            "🌿 Бот приложения «Мой сад»\n\n"
+            "Нажми на кнопки ниже, чтобы посмотреть задачи или растения.\n"
+            "Команды: /tasks, /garden, /stop, /help"
+        )
+        answer_callback(cb_id)
+        return
+
+    # Кнопки действий с растениями: water:1, feed:1, transplant:1, harvest:1
+    if ':' in data:
+        action, plant_id_str = data.split(':', 1)
+        try:
+            plant_id = int(plant_id_str)
+        except ValueError:
+            answer_callback(cb_id, "Ошибка данных")
+            return
+
+        plant = query('''SELECT up.*, pc.name FROM user_plants up
+                         JOIN plants_catalog pc ON up.plant_id = pc.id
+                         WHERE up.id = %s AND up.user_id = %s''',
+                      (plant_id, user['id']), one=True)
+        if not plant:
+            answer_callback(cb_id, "Растение не найдено", show_alert=True)
+            return
+
+        today_iso = date.today().isoformat()
+
+        if action == 'water':
+            execute('UPDATE user_plants SET last_watered = %s WHERE id = %s AND user_id = %s',
+                    (today_iso, plant_id, user['id']))
+            update_streak(user['id'])
+            answer_callback(cb_id, f"💧 {plant['name']} полито!")
+            confirm = f"✅ <b>{plant['name']}</b> — полито {today_iso}"
+        elif action == 'feed':
+            execute('UPDATE user_plants SET last_fed = %s WHERE id = %s AND user_id = %s',
+                    (today_iso, plant_id, user['id']))
+            update_streak(user['id'])
+            answer_callback(cb_id, f"🧪 {plant['name']} подкормлено!")
+            confirm = f"✅ <b>{plant['name']}</b> — подкормлено {today_iso}"
+        elif action == 'transplant':
+            execute('INSERT INTO garden_log (user_id, plant_id, action, action_date, note) VALUES (%s,%s,%s,%s,%s)',
+                    (user['id'], plant_id, 'пересадка', today_iso, 'Пересажено через Telegram'))
+            update_streak(user['id'])
+            answer_callback(cb_id, f"🌱 {plant['name']} пересажено!")
+            confirm = f"✅ <b>{plant['name']}</b> — пересажено {today_iso}"
+        elif action == 'harvest':
+            execute('INSERT INTO garden_log (user_id, plant_id, action, action_date, note) VALUES (%s,%s,%s,%s,%s)',
+                    (user['id'], plant_id, 'урожай', today_iso, 'Собрано через Telegram'))
+            update_streak(user['id'])
+            answer_callback(cb_id, f"🧺 Урожай {plant['name']} собран!")
+            confirm = f"✅ <b>{plant['name']}</b> — урожай собран {today_iso}"
+        else:
+            answer_callback(cb_id, "Неизвестное действие")
+            return
+
+        # Обновляем текст сообщения — убираем нажатую кнопку
+        old_text = message.get('text', '') or ''
+        new_text = old_text + f"\n\n{confirm}"
+        # Убираем старые кнопки, оставляем только невыполненные — упрощённо: убираем все
+        # (более сложная логика — обновлять отдельные кнопки — избыточна для MVP)
+        # Пересобираем задачи заново
+        new_text2, new_keyboard = build_tasks_reply(user)
+        # Если есть ещё задачи — показываем новое меню, если нет — просто подтверждение
+        if new_keyboard:
+            edit_telegram_message(
+                chat_id, message_id,
+                new_text2 + f"\n\n{confirm}",
+                reply_markup=new_keyboard
+            )
+        else:
+            edit_telegram_message(
+                chat_id, message_id,
+                f"{confirm}\n\n🎉 Все задачи на сегодня выполнены!"
+            )
+
+
 # ---------- Роуты ----------
 @app.route('/healthz')
 def healthz():
@@ -570,87 +856,20 @@ def healthz():
 
 @app.route('/telegram/webhook', methods=['POST'])
 def telegram_webhook():
-    """Принимает обновления от Telegram и обрабатывает команды вручную."""
+    """Принимает обновления от Telegram."""
     try:
         data = request.get_json(force=True, silent=True) or {}
-        print(f"[TG] Webhook: {data}", flush=True)
+        print(f"[TG] Webhook: {str(data)[:500]}", flush=True)
 
-        message = data.get('message') or data.get('edited_message') or {}
-        if not message:
-            return 'ok', 200
+        if 'message' in data or 'edited_message' in data:
+            msg = data.get('message') or data.get('edited_message')
+            handle_telegram_message(msg)
 
-        text = (message.get('text') or '').strip()
-        chat = message.get('chat') or {}
-        chat_id = chat.get('id')
-
-        if not chat_id or not text:
-            return 'ok', 200
-
-        # Разбираем команду: /start, /start username, /help, /stop
-        parts = text.split(maxsplit=1)
-        command = parts[0].lower()
-        # Убираем @username от Telegram, если есть: /start@my_bot → /start
-        if '@' in command:
-            command = command.split('@')[0]
-
-        if command == '/start':
-            if len(parts) > 1:
-                app_username = parts[1].strip().lower()
-                user = query('SELECT id, name FROM users WHERE LOWER(username) = %s',
-                             (app_username,), one=True)
-                if user:
-                    execute('UPDATE users SET telegram_id = %s WHERE id = %s',
-                            (chat_id, user['id']))
-                    name = user['name'] or app_username
-                    send_telegram_message(
-                        chat_id,
-                        f"Привет, {name}! 🌿\n\n"
-                        f"Теперь я буду присылать тебе напоминания о поливе и подкормке.\n"
-                        f"Каждое утро в 8:00 по Москве жди сообщение с задачами на день.\n\n"
-                        f"Команды:\n"
-                        f"/help — справка\n"
-                        f"/stop — отключить напоминания"
-                    )
-                    print(f"[TG] Привязан telegram_id={chat_id} к user_id={user['id']}", flush=True)
-                else:
-                    send_telegram_message(
-                        chat_id,
-                        f"Не нашёл пользователя с логином «{app_username}» в приложении «Мой сад».\n"
-                        f"Проверь логин в профиле приложения и нажми «Подключить Telegram» ещё раз."
-                    )
-            else:
-                send_telegram_message(
-                    chat_id,
-                    "Привет! 🌿 Я бот приложения «Мой сад».\n\n"
-                    "Чтобы получать напоминания, открой приложение и нажми «Подключить Telegram» "
-                    "в разделе «Профиль»."
-                )
-
-        elif command == '/stop':
-            execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = %s', (chat_id,))
-            send_telegram_message(
-                chat_id,
-                "Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start."
-            )
-
-        elif command == '/help':
-            send_telegram_message(
-                chat_id,
-                "🌿 Бот приложения «Мой сад»\n\n"
-                "Команды:\n"
-                "/start — приветствие и привязка аккаунта\n"
-                "/stop — отключить напоминания\n"
-                "/help — эта справка"
-            )
-
-        else:
-            send_telegram_message(
-                chat_id,
-                "Я понимаю только команды /start, /stop и /help."
-            )
+        elif 'callback_query' in data:
+            cb = data['callback_query']
+            handle_telegram_callback(cb)
 
         return 'ok', 200
-
     except Exception as e:
         print(f"[TG] Ошибка webhook: {type(e).__name__}: {e}", flush=True)
         return 'ok', 200
@@ -662,23 +881,17 @@ def cron_send_reminders():
     if secret != CRON_SECRET:
         return 'Forbidden', 403
 
-    users = query('SELECT id, name, telegram_id FROM users WHERE telegram_id IS NOT NULL')
+    users = query('SELECT * FROM users WHERE telegram_id IS NOT NULL')
     if not users:
         return 'No users with Telegram', 200
 
     sent = 0
     for u in users:
-        tasks = get_today_tasks(u['id'])
-        if not tasks:
-            text = f"🌿 Привет, {u['name'] or 'садовод'}!\n\nСегодня задач нет. Отдыхай или добавь новые растения!"
-        else:
-            lines = [f"🌿 Доброе утро, {u['name'] or 'садовод'}!\n", "Сегодня нужно:"]
-            for task in tasks:
-                icon = {'water': '💧', 'feed': '🧪', 'transplant': '🌱', 'harvest': '🧺'}.get(task['type'], '•')
-                lines.append(f"{icon} {task['message']}")
-            text = '\n'.join(lines)
-
-        if send_telegram_message(u['telegram_id'], text):
+        text, keyboard = build_tasks_reply(u)
+        if not text:
+            continue
+        text = f"🌿 Доброе утро, {u['name'] or 'садовод'}!\n\n" + text
+        if send_telegram_message(u['telegram_id'], text, reply_markup=keyboard):
             sent += 1
 
     print(f"[TG] Отправлено напоминаний: {sent}", flush=True)
