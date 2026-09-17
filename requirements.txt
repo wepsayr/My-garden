@@ -4,4 +4,3 @@ requests
 gunicorn
 Pillow
 pillow-heif
-python-telegram-bot==20.7
