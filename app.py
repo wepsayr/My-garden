@@ -3,6 +3,7 @@ import io
 import base64
 import secrets
 import requests
+import asyncio
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
@@ -16,7 +17,6 @@ except Exception as e:
     print(f"[IMG] HEIC поддержка недоступна: {e}", flush=True)
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -26,7 +26,9 @@ app.permanent_session_lifetime = timedelta(days=365)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_USERNAME = os.environ.get('TELEGRAM_BOT_USERNAME', '')
 CRON_SECRET = os.environ.get('CRON_SECRET', 'change-me-cron-secret')
+
 
 # ---------- Работа с БД ----------
 def get_db():
@@ -67,10 +69,9 @@ def execute(sql, args=(), returning=False):
         cur.close()
 
 
-_db_initialized = False
-
 # ---------- Telegram Bot ----------
 telegram_app = None
+
 
 def get_telegram_app():
     """Ленивая инициализация Telegram Application."""
@@ -85,17 +86,14 @@ def get_telegram_app():
 
 
 async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка команды /start."""
+    """Обработка команды /start. Если передан аргумент — привязываем username."""
     chat_id = update.effective_chat.id
     username = update.effective_user.username or update.effective_user.first_name
-    print(f"[TG] /start от chat_id={chat_id}, username={username}", flush=True)
+    print(f"[TG] /start от chat_id={chat_id}, username={username}, args={context.args}", flush=True)
 
-    # Привязываем chat_id к пользователю, если он ввёл команду с параметром
-    # Формат: /start <username_в_приложении>
-    # Например: /start natasha
     if context.args:
-        app_username = context.args[0].strip()
-        user = query('SELECT id, name FROM users WHERE username = %s', (app_username,), one=True)
+        app_username = context.args[0].strip().lower()
+        user = query('SELECT id, name FROM users WHERE LOWER(username) = %s', (app_username,), one=True)
         if user:
             execute('UPDATE users SET telegram_id = %s WHERE id = %s', (chat_id, user['id']))
             name = user['name'] or app_username
@@ -105,18 +103,22 @@ async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Каждое утро в 8:00 по Москве жди сообщение с задачами на день."
             )
             return
+        else:
+            await update.message.reply_text(
+                f"Не нашёл пользователя с логином «{app_username}» в приложении «Мой сад».\n"
+                f"Проверь логин в профиле приложения и попробуй снова."
+            )
+            return
 
     await update.message.reply_text(
         "Привет! 🌿 Я бот приложения «Мой сад».\n\n"
-        "Чтобы получать напоминания, перейди в приложение по ссылке:\n"
-        "https://my-garden-zgn7.onrender.com/profile\n\n"
-        "Там нажми «Подключить Telegram» — и я привяжу твой аккаунт."
+        "Чтобы получать напоминания, открой приложение и нажми «Подключить Telegram» в профиле."
     )
 
 
 async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Я бот приложения «Мой сад» 🌿\n\n"
+        "🌿 Бот приложения «Мой сад»\n\n"
         "Команды:\n"
         "/start — приветствие и привязка аккаунта\n"
         "/stop — отключить напоминания\n"
@@ -127,11 +129,15 @@ async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tg_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = %s', (chat_id,))
-    await update.message.reply_text("Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start.")
+    await update.message.reply_text(
+        "Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start."
+    )
 
 
 def send_telegram_message(chat_id, text):
     """Синхронная отправка сообщения через HTTP API Telegram."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         r = requests.post(url, json={
@@ -146,6 +152,11 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"[TG] Исключение при отправке: {e}", flush=True)
         return False
+
+
+# ---------- Инициализация БД ----------
+_db_initialized = False
+
 
 def init_db():
     """Создаёт таблицы и наполняет каталог. Выполняется один раз за процесс."""
@@ -177,6 +188,7 @@ def init_db():
                     current_streak INTEGER DEFAULT 0,
                     best_streak INTEGER DEFAULT 0,
                     last_active_date DATE,
+                    telegram_id BIGINT UNIQUE,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
@@ -227,8 +239,7 @@ def init_db():
         finally:
             cur.close()
 
-        # --- Миграции: добавляем новые колонки, если БД создавалась раньше ---
-        # Postgres поддерживает ADD COLUMN IF NOT EXISTS, так что это безопасно.
+        # Миграции — безопасны при повторном запуске
         for sql in [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS lat REAL",
@@ -341,6 +352,7 @@ def send_reset_email(to_email, reset_link):
         return False
 
 
+# ---------- Погода ----------
 WMO_CODES = {
     0: "☀️ Ясно", 1: "🌤 Малооблачно", 2: "⛅ Облачно", 3: "☁️ Пасмурно",
     45: "🌫 Туман", 48: "🌫 Туман",
@@ -351,56 +363,24 @@ WMO_CODES = {
     95: "⛈ Гроза", 96: "⛈ Гроза с градом", 99: "⛈ Сильная гроза",
 }
 
-# Коды погоды wttr.in (World Weather codes, WW)
 WW_CODES = {
-    113: "☀️ Ясно",
-    116: "🌤 Переменная облачность",
-    119: "⛅ Облачно",
-    122: "☁️ Пасмурно",
-    143: "🌫 Туман",
-    176: "🌦 Местами дождь",
-    179: "🌨 Местами снег",
-    182: "🌨 Местами мокрый снег",
-    185: "🌧 Морось",
-    200: "⛈ Гроза",
-    227: "🌨 Позёмок",
-    230: "🌨 Метель",
-    248: "🌫 Туман",
-    260: "🌫 Ледяной туман",
-    263: "🌦 Мелкая морось",
-    266: "🌦 Морось",
-    281: "🌧 Ледяная морось",
-    284: "🌧 Сильная ледяная морось",
-    293: "🌦 Местами слабый дождь",
-    296: "🌦 Слабый дождь",
-    299: "🌧 Умеренный дождь",
-    302: "🌧 Умеренный дождь",
-    305: "🌧 Сильный дождь",
-    308: "🌧 Сильный дождь",
-    311: "🌧 Ледяной дождь",
-    314: "🌧 Сильный ледяной дождь",
-    317: "🌨 Мокрый снег",
-    320: "🌨 Сильный мокрый снег",
-    323: "🌨 Местами слабый снег",
-    326: "🌨 Слабый снег",
-    329: "🌨 Умеренный снег",
-    332: "🌨 Умеренный снег",
-    335: "🌨 Сильный снег",
-    338: "🌨 Сильный снег",
-    350: "🌨 Ледяная крупа",
-    353: "🌦 Небольшой ливень",
-    356: "🌧 Сильный ливень",
-    359: "🌧 Проливной дождь",
-    362: "🌨 Ливень с мокрым снегом",
-    365: "🌨 Сильный ливень с мокрым снегом",
-    368: "🌨 Небольшой снегопад",
-    371: "🌨 Сильный снегопад",
-    374: "🌨 Ливень с ледяной крупой",
-    377: "🌨 Сильный ливень с ледяной крупой",
-    386: "⛈ Дождь с грозой",
-    389: "⛈ Сильный дождь с грозой",
-    392: "⛈ Снег с грозой",
-    395: "⛈ Сильный снег с грозой",
+    113: "☀️ Ясно", 116: "🌤 Переменная облачность", 119: "⛅ Облачно", 122: "☁️ Пасмурно",
+    143: "🌫 Туман", 176: "🌦 Местами дождь", 179: "🌨 Местами снег", 182: "🌨 Местами мокрый снег",
+    185: "🌧 Морось", 200: "⛈ Гроза", 227: "🌨 Позёмок", 230: "🌨 Метель",
+    248: "🌫 Туман", 260: "🌫 Ледяной туман", 263: "🌦 Мелкая морось", 266: "🌦 Морось",
+    281: "🌧 Ледяная морось", 284: "🌧 Сильная ледяная морось",
+    293: "🌦 Местами слабый дождь", 296: "🌦 Слабый дождь", 299: "🌧 Умеренный дождь",
+    302: "🌧 Умеренный дождь", 305: "🌧 Сильный дождь", 308: "🌧 Сильный дождь",
+    311: "🌧 Ледяной дождь", 314: "🌧 Сильный ледяной дождь",
+    317: "🌨 Мокрый снег", 320: "🌨 Сильный мокрый снег",
+    323: "🌨 Местами слабый снег", 326: "🌨 Слабый снег", 329: "🌨 Умеренный снег",
+    332: "🌨 Умеренный снег", 335: "🌨 Сильный снег", 338: "🌨 Сильный снег",
+    350: "🌨 Ледяная крупа", 353: "🌦 Небольшой ливень", 356: "🌧 Сильный ливень",
+    359: "🌧 Проливной дождь", 362: "🌨 Ливень с мокрым снегом",
+    365: "🌨 Сильный ливень с мокрым снегом", 368: "🌨 Небольшой снегопад",
+    371: "🌨 Сильный снегопад", 374: "🌨 Ливень с ледяной крупой",
+    377: "🌨 Сильный ливень с ледяной крупой", 386: "⛈ Дождь с грозой",
+    389: "⛈ Сильный дождь с грозой", 392: "⛈ Снег с грозой", 395: "⛈ Сильный снег с грозой",
 }
 
 
@@ -420,78 +400,15 @@ def geocode_city(city):
         print(f"[GEOCODE] Ошибка: {e}", flush=True)
     return None, None
 
-def _decline_simple(word):
-    """Склоняет одно слово в предложный падеж: Москва → Москве, Казань → Казани."""
-    if not word or len(word) < 2:
-        return word
-    last = word[-1].lower()
 
-    # Не склоняются: Сочи, Токио, Осло, Баку, Хельсинки
-    if last in ('о', 'е', 'и', 'у', 'ю', 'ы', 'э'):
-        return word
-
-    # -ия → -ии (напр. Малайзия → Малайзии)
-    if word[-2:].lower() == 'ия':
-        return word[:-1] + 'и'
-
-    # -ья → -ье (Марья → Марье)
-    if word[-2:].lower() == 'ья':
-        return word[:-1] + 'е'
-
-    # -а → -е (Москва → Москве, Тула → Туле)
-    if last == 'а':
-        return word[:-1] + 'е'
-
-    # -я → -е (редко, но пусть будет)
-    if last == 'я':
-        return word[:-1] + 'е'
-
-    # -ь → -и (Казань → Казани, Тверь → Твери)
-    if last == 'ь':
-        return word[:-1] + 'и'
-
-    # Согласная → +е (Новосибирск → Новосибирске, Воронеж → Воронеже)
-    return word + 'е'
-
-
-def city_to_prepositional(city):
-    """Склоняет название города в предложный падеж: 'Москва' → 'Москве'."""
-    if not city:
-        return city
-    c = city.strip()
-    if len(c) < 2:
-        return c
-
-    # Составные через дефис: Санкт-Петербург → Санкт-Петербурге
-    if '-' in c:
-        parts = c.split('-')
-        # Если есть строчные части типа «на-Дону» — не трогаем (сложно)
-        if any(p and p[0].islower() for p in parts):
-            return c
-        parts[-1] = _decline_simple(parts[-1])
-        return '-'.join(parts)
-
-    # Названия с пробелом: склоняем последнее слово
-    if ' ' in c:
-        parts = c.split(' ')
-        parts[-1] = _decline_simple(parts[-1])
-        return ' '.join(parts)
-
-    return _decline_simple(c)
-
-    
 def get_weather_forecast(lat, lon):
-    """Возвращает список из 3 дней прогноза с wttr.in (бесплатно, без ключа)."""
+    """Возвращает список из 3 дней прогноза с wttr.in."""
     try:
         lat_f = float(lat)
         lon_f = float(lon)
 
         url = f"https://wttr.in/{lat_f},{lon_f}?format=j1&lang=ru"
-        print(f"[WEATHER] Запрос к wttr.in: {url}", flush=True)
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; GardenApp/1.0)"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; GardenApp/1.0)"}
         r = requests.get(url, headers=headers, timeout=15)
 
         if r.status_code != 200:
@@ -499,7 +416,6 @@ def get_weather_forecast(lat, lon):
             return []
 
         data = r.json()
-
         forecast = data.get("weather") or []
         if not forecast:
             print("[WEATHER] wttr.in вернул пустой weather", flush=True)
@@ -528,10 +444,10 @@ def get_weather_forecast(lat, lon):
                 "tmin": float(item.get("mintempC", 0)),
                 "precip": round(precip, 1),
                 "code": code,
-                "desc": WW_CODES.get(code, "❓"),  # ← вот здесь ключевое изменение
+                "desc": WW_CODES.get(code, "❓"),
             })
 
-        print(f"[WEATHER] wttr.in: получено дней {len(days)}, коды: {[d['code'] for d in days]}", flush=True)
+        print(f"[WEATHER] wttr.in: получено дней {len(days)}", flush=True)
         return days
 
     except Exception as e:
@@ -540,7 +456,7 @@ def get_weather_forecast(lat, lon):
 
 
 def get_weather_advice(days):
-    """Генерирует список подсказок на основе прогноза."""
+    """Подсказки на основе прогноза."""
     if not days:
         return []
     advice = []
@@ -555,42 +471,74 @@ def get_weather_advice(days):
         advice.append("❄️ Холодная ночь — укрой теплолюбивые растения")
     if today and today["tmax"] is not None and today["tmax"] < 10:
         advice.append("🥶 Холодно — поливай реже обычного")
-
     return advice
 
 
-# ---------- Streak (серия) ----------
+def _decline_simple(word):
+    """Склоняет одно слово в предложный падеж."""
+    if not word or len(word) < 2:
+        return word
+    last = word[-1].lower()
+    if last in ('о', 'е', 'и', 'у', 'ю', 'ы', 'э'):
+        return word
+    if word[-2:].lower() == 'ия':
+        return word[:-1] + 'и'
+    if word[-2:].lower() == 'ья':
+        return word[:-1] + 'е'
+    if last == 'а':
+        return word[:-1] + 'е'
+    if last == 'я':
+        return word[:-1] + 'е'
+    if last == 'ь':
+        return word[:-1] + 'и'
+    return word + 'е'
+
+
+def city_to_prepositional(city):
+    """Склоняет название города в предложный падеж."""
+    if not city:
+        return city
+    c = city.strip()
+    if len(c) < 2:
+        return c
+    if '-' in c:
+        parts = c.split('-')
+        if any(p and p[0].islower() for p in parts):
+            return c
+        parts[-1] = _decline_simple(parts[-1])
+        return '-'.join(parts)
+    if ' ' in c:
+        parts = c.split(' ')
+        parts[-1] = _decline_simple(parts[-1])
+        return ' '.join(parts)
+    return _decline_simple(c)
+
+
+# ---------- Streak ----------
 def update_streak(user_id):
-    """Обновляет серию дней с активностью."""
     user = query('SELECT current_streak, best_streak, last_active_date FROM users WHERE id = %s',
                  (user_id,), one=True)
     if not user:
         return
-
     today = date.today()
     last = user['last_active_date']
     if isinstance(last, str):
         last = datetime.strptime(last[:10], '%Y-%m-%d').date()
-
     current = user['current_streak'] or 0
     best = user['best_streak'] or 0
-
     if last == today:
-        return  # уже отмечались сегодня
-
+        return
     if last and (today - last).days == 1:
         current += 1
     else:
         current = 1
-
     if current > best:
         best = current
-
     execute('UPDATE users SET current_streak=%s, best_streak=%s, last_active_date=%s WHERE id=%s',
             (current, best, today.isoformat(), user_id))
 
 
-# ---------- Вспомогательные функции ----------
+# ---------- Вспомогательные ----------
 def get_user():
     if 'user_id' in session:
         return query('SELECT * FROM users WHERE id = %s', (session['user_id'],), one=True)
@@ -698,63 +646,62 @@ CARE_TIPS = {
 }
 
 
-# ---------- Маршруты ----------
+# ---------- Роуты ----------
 @app.route('/healthz')
 def healthz():
     return 'ok', 200
 
+
 @app.route('/telegram/webhook', methods=['POST'])
 def telegram_webhook():
     """Принимает обновления от Telegram."""
-    telegram_app = get_telegram_app()
-    if not telegram_app:
+    t_app = get_telegram_app()
+    if not t_app:
         return 'Bot not configured', 503
-
     try:
         data = request.get_json(force=True)
-        update = Update.de_json(data, telegram_app.bot)
-
-        # Запускаем обработку в новом event loop
+        update = Update.de_json(data, t_app.bot)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.process_update(update))
-        loop.close()
-
+        try:
+            loop.run_until_complete(t_app.initialize())
+            loop.run_until_complete(t_app.process_update(update))
+        finally:
+            loop.close()
         return 'ok', 200
     except Exception as e:
-        print(f"[TG] Ошибка webhook: {e}", flush=True)
+        print(f"[TG] Ошибка webhook: {type(e).__name__}: {e}", flush=True)
         return f'Error: {e}', 500
+
 
 @app.route('/cron/send_reminders', methods=['POST', 'GET'])
 def cron_send_reminders():
     """Отправляет ежедневные напоминания всем пользователям с привязанным Telegram."""
-    # Простая защита: секретный параметр
     secret = request.args.get('secret', '')
     if secret != CRON_SECRET:
         return 'Forbidden', 403
 
-    users = query('SELECT id, name, telegram_id, city FROM users WHERE telegram_id IS NOT NULL')
+    users = query('SELECT id, name, telegram_id FROM users WHERE telegram_id IS NOT NULL')
     if not users:
         return 'No users with Telegram', 200
 
     sent = 0
-    for user in users:
-        tasks = get_today_tasks(user['id'])
+    for u in users:
+        tasks = get_today_tasks(u['id'])
         if not tasks:
-            # Можно отправить короткое сообщение или пропустить
-            text = f"🌿 Привет, {user['name'] or 'садовод'}!\n\nСегодня задач нет. Отдыхай или добавь новые растения!"
+            text = f"🌿 Привет, {u['name'] or 'садовод'}!\n\nСегодня задач нет. Отдыхай или добавь новые растения!"
         else:
-            lines = [f"🌿 Доброе утро, {user['name'] or 'садовод'}!\n", "Сегодня нужно:"]
+            lines = [f"🌿 Доброе утро, {u['name'] or 'садовод'}!\n", "Сегодня нужно:"]
             for task in tasks:
                 icon = {'water': '💧', 'feed': '🧪', 'transplant': '🌱', 'harvest': '🧺'}.get(task['type'], '•')
                 lines.append(f"{icon} {task['message']}")
             text = '\n'.join(lines)
-
-        if send_telegram_message(user['telegram_id'], text):
+        if send_telegram_message(u['telegram_id'], text):
             sent += 1
 
     print(f"[TG] Отправлено напоминаний: {sent}", flush=True)
     return f'Sent: {sent}', 200
+
 
 @app.route('/')
 def splash():
@@ -768,29 +715,23 @@ def dashboard():
     if not user:
         return redirect(url_for('login'))
 
-    # Страховка: если есть город, но нет координат — геокодируем прямо сейчас
     if user['city'] and (not user['lat'] or not user['lon']):
         lat, lon = geocode_city(user['city'])
         if lat and lon:
             execute('UPDATE users SET lat=%s, lon=%s WHERE id=%s', (lat, lon, user['id']))
             user = get_user()
             print(f"[GEOCODE] Город '{user['city']}' → {lat}, {lon}", flush=True)
-        else:
-            print(f"[GEOCODE] Не удалось найти город: '{user['city']}'", flush=True)
 
     tasks = get_today_tasks(user['id'])
     plants_count = len(get_user_plants(user['id']))
 
-    # Погода
     weather = []
     weather_advice = []
     if user['lat'] and user['lon']:
         weather = get_weather_forecast(user['lat'], user['lon'])
         weather_advice = get_weather_advice(weather)
-        if not weather:
-            print(f"[WEATHER] Не удалось получить прогноз для lat={user['lat']}, lon={user['lon']}", flush=True)
 
-        city_in_case = city_to_prepositional(user['city']) if user['city'] else None
+    city_in_case = city_to_prepositional(user['city']) if user['city'] else None
 
     return render_template('index.html', user=user, tasks=tasks, plants_count=plants_count,
                            weather=weather, weather_advice=weather_advice,
@@ -859,11 +800,9 @@ def forgot_password():
         if user:
             token = secrets.token_urlsafe(32)
             expires_at = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
-
             execute('DELETE FROM password_reset_tokens WHERE user_id = %s', (user['id'],))
             execute('INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (%s,%s,%s)',
                     (user['id'], token, expires_at))
-
             reset_link = url_for('reset_password', token=token, _external=True)
             if send_reset_email(email, reset_link):
                 flash('Ссылка для сброса отправлена на почту', 'success')
@@ -873,7 +812,6 @@ def forgot_password():
         else:
             flash('Если такой email зарегистрирован — мы отправили на него ссылку.', 'success')
         return redirect(url_for('login'))
-
     return render_template('forgot_password.html')
 
 
@@ -903,7 +841,6 @@ def reset_password(token):
         execute('DELETE FROM password_reset_tokens WHERE id = %s', (reset['id'],))
         flash('Пароль успешно изменён! Теперь войди с новым паролем.', 'success')
         return redirect(url_for('login'))
-
     return render_template('reset_password.html', token=token)
 
 
@@ -1014,24 +951,16 @@ def upload_plant_photo(plant_id):
         flash('Файл не выбран', 'error')
         return redirect(url_for('plant_detail', plant_id=plant_id))
     try:
-        # Читаем все байты в память и оборачиваем в BytesIO —
-        # так указатель точно в начале, и Pillow прочитает файл корректно.
         raw = file.read()
         if not raw:
             flash('Файл пустой', 'error')
             return redirect(url_for('plant_detail', plant_id=plant_id))
-
         stream = io.BytesIO(raw)
         img = Image.open(stream)
-        img.load()  # форсируем чтение пикселей
-
-        # Приводим к RGB (HEIC, PNG с прозрачностью, палитра — всё сконвертируется)
+        img.load()
         if img.mode != 'RGB':
             img = img.convert('RGB')
-
-        # Ресайз: длинная сторона — максимум 800px
         img.thumbnail((800, 800))
-
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=80, optimize=True)
         b64 = base64.b64encode(buf.getvalue()).decode('ascii')
@@ -1181,7 +1110,6 @@ def profile():
                 flash('Этот email уже привязан к другому аккаунту', 'error')
                 return redirect(url_for('profile'))
 
-        # Геокодируем город, если он изменился
         old_city = user['city'] or ''
         if city and city != old_city:
             lat, lon = geocode_city(city)
@@ -1195,7 +1123,18 @@ def profile():
                 (name, theme, email or None, city or None, user['id']))
         flash('Профиль сохранён', 'success')
         return redirect(url_for('profile'))
-    return render_template('profile.html', user=user)
+    return render_template('profile.html', user=user,
+                           telegram_bot_username=TELEGRAM_BOT_USERNAME)
+
+
+@app.route('/telegram/disconnect', methods=['POST'])
+def telegram_disconnect():
+    user = get_user()
+    if not user:
+        return redirect(url_for('login'))
+    execute('UPDATE users SET telegram_id = NULL WHERE id = %s', (user['id'],))
+    flash('Telegram отключён', 'success')
+    return redirect(url_for('profile'))
 
 
 if __name__ == '__main__':
