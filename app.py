@@ -3,7 +3,6 @@ import io
 import base64
 import secrets
 import requests
-import asyncio
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
@@ -17,8 +16,6 @@ except Exception as e:
     print(f"[IMG] HEIC поддержка недоступна: {e}", flush=True)
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'garden_secret_key_change_me')
@@ -69,85 +66,21 @@ def execute(sql, args=(), returning=False):
         cur.close()
 
 
-# ---------- Telegram Bot ----------
-telegram_app = None
-
-
-def get_telegram_app():
-    """Ленивая инициализация Telegram Application."""
-    global telegram_app
-    if telegram_app is None and TELEGRAM_BOT_TOKEN:
-        telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        telegram_app.add_handler(CommandHandler("start", tg_start))
-        telegram_app.add_handler(CommandHandler("help", tg_help))
-        telegram_app.add_handler(CommandHandler("stop", tg_stop))
-        print("[TG] Telegram Application инициализирован", flush=True)
-    return telegram_app
-
-
-async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка команды /start. Если передан аргумент — привязываем username."""
-    chat_id = update.effective_chat.id
-    username = update.effective_user.username or update.effective_user.first_name
-    print(f"[TG] /start от chat_id={chat_id}, username={username}, args={context.args}", flush=True)
-
-    if context.args:
-        app_username = context.args[0].strip().lower()
-        user = query('SELECT id, name FROM users WHERE LOWER(username) = %s', (app_username,), one=True)
-        if user:
-            execute('UPDATE users SET telegram_id = %s WHERE id = %s', (chat_id, user['id']))
-            name = user['name'] or app_username
-            await update.message.reply_text(
-                f"Привет, {name}! 🌿\n\n"
-                f"Теперь я буду присылать тебе напоминания о поливе и подкормке.\n"
-                f"Каждое утро в 8:00 по Москве жди сообщение с задачами на день."
-            )
-            return
-        else:
-            await update.message.reply_text(
-                f"Не нашёл пользователя с логином «{app_username}» в приложении «Мой сад».\n"
-                f"Проверь логин в профиле приложения и попробуй снова."
-            )
-            return
-
-    await update.message.reply_text(
-        "Привет! 🌿 Я бот приложения «Мой сад».\n\n"
-        "Чтобы получать напоминания, открой приложение и нажми «Подключить Telegram» в профиле."
-    )
-
-
-async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🌿 Бот приложения «Мой сад»\n\n"
-        "Команды:\n"
-        "/start — приветствие и привязка аккаунта\n"
-        "/stop — отключить напоминания\n"
-        "/help — эта справка"
-    )
-
-
-async def tg_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = %s', (chat_id,))
-    await update.message.reply_text(
-        "Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start."
-    )
-
-
+# ---------- Отправка сообщений Telegram ----------
 def send_telegram_message(chat_id, text):
-    """Синхронная отправка сообщения через HTTP API Telegram."""
+    """Отправка сообщения через HTTP API Telegram (синхронно)."""
     if not TELEGRAM_BOT_TOKEN:
+        print("[TG] TELEGRAM_BOT_TOKEN не задан", flush=True)
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         r = requests.post(url, json={
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "HTML"
         }, timeout=10)
         if r.status_code == 200:
             return True
-        print(f"[TG] Ошибка отправки: {r.status_code} — {r.text[:200]}", flush=True)
+        print(f"[TG] Ошибка отправки: {r.status_code} — {r.text[:300]}", flush=True)
         return False
     except Exception as e:
         print(f"[TG] Исключение при отправке: {e}", flush=True)
@@ -159,7 +92,6 @@ _db_initialized = False
 
 
 def init_db():
-    """Создаёт таблицы и наполняет каталог. Выполняется один раз за процесс."""
     global _db_initialized
     if _db_initialized:
         return
@@ -239,7 +171,6 @@ def init_db():
         finally:
             cur.close()
 
-        # Миграции — безопасны при повторном запуске
         for sql in [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS lat REAL",
@@ -385,7 +316,6 @@ WW_CODES = {
 
 
 def geocode_city(city):
-    """Возвращает (lat, lon) по названию города или (None, None)."""
     try:
         r = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
@@ -402,25 +332,19 @@ def geocode_city(city):
 
 
 def get_weather_forecast(lat, lon):
-    """Возвращает список из 3 дней прогноза с wttr.in."""
     try:
         lat_f = float(lat)
         lon_f = float(lon)
-
         url = f"https://wttr.in/{lat_f},{lon_f}?format=j1&lang=ru"
         headers = {"User-Agent": "Mozilla/5.0 (compatible; GardenApp/1.0)"}
         r = requests.get(url, headers=headers, timeout=15)
-
         if r.status_code != 200:
-            print(f"[WEATHER] wttr.in HTTP {r.status_code}: {r.text[:300]}", flush=True)
+            print(f"[WEATHER] wttr.in HTTP {r.status_code}", flush=True)
             return []
-
         data = r.json()
         forecast = data.get("weather") or []
         if not forecast:
-            print("[WEATHER] wttr.in вернул пустой weather", flush=True)
             return []
-
         days = []
         for item in forecast[:3]:
             hourly = item.get("hourly") or []
@@ -437,7 +361,6 @@ def get_weather_forecast(lat, lon):
                         precip += float(h.get("precipMM", 0) or 0)
                     except (TypeError, ValueError):
                         pass
-
             days.append({
                 "date": item.get("date"),
                 "tmax": float(item.get("maxtempC", 0)),
@@ -446,23 +369,18 @@ def get_weather_forecast(lat, lon):
                 "code": code,
                 "desc": WW_CODES.get(code, "❓"),
             })
-
-        print(f"[WEATHER] wttr.in: получено дней {len(days)}", flush=True)
         return days
-
     except Exception as e:
-        print(f"[WEATHER] wttr.in исключение: {type(e).__name__}: {e}", flush=True)
+        print(f"[WEATHER] wttr.in исключение: {e}", flush=True)
         return []
 
 
 def get_weather_advice(days):
-    """Подсказки на основе прогноза."""
     if not days:
         return []
     advice = []
     today = days[0] if len(days) > 0 else None
     tomorrow = days[1] if len(days) > 1 else None
-
     if tomorrow and tomorrow["precip"] and tomorrow["precip"] > 3:
         advice.append("🌧 Завтра дождь — можно не поливать")
     if today and today["tmax"] is not None and today["tmax"] > 30:
@@ -475,7 +393,6 @@ def get_weather_advice(days):
 
 
 def _decline_simple(word):
-    """Склоняет одно слово в предложный падеж."""
     if not word or len(word) < 2:
         return word
     last = word[-1].lower()
@@ -495,7 +412,6 @@ def _decline_simple(word):
 
 
 def city_to_prepositional(city):
-    """Склоняет название города в предложный падеж."""
     if not city:
         return city
     c = city.strip()
@@ -654,29 +570,94 @@ def healthz():
 
 @app.route('/telegram/webhook', methods=['POST'])
 def telegram_webhook():
-    """Принимает обновления от Telegram."""
-    t_app = get_telegram_app()
-    if not t_app:
-        return 'Bot not configured', 503
+    """Принимает обновления от Telegram и обрабатывает команды вручную."""
     try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, t_app.bot)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(t_app.initialize())
-            loop.run_until_complete(t_app.process_update(update))
-        finally:
-            loop.close()
+        data = request.get_json(force=True, silent=True) or {}
+        print(f"[TG] Webhook: {data}", flush=True)
+
+        message = data.get('message') or data.get('edited_message') or {}
+        if not message:
+            return 'ok', 200
+
+        text = (message.get('text') or '').strip()
+        chat = message.get('chat') or {}
+        chat_id = chat.get('id')
+
+        if not chat_id or not text:
+            return 'ok', 200
+
+        # Разбираем команду: /start, /start username, /help, /stop
+        parts = text.split(maxsplit=1)
+        command = parts[0].lower()
+        # Убираем @username от Telegram, если есть: /start@my_bot → /start
+        if '@' in command:
+            command = command.split('@')[0]
+
+        if command == '/start':
+            if len(parts) > 1:
+                app_username = parts[1].strip().lower()
+                user = query('SELECT id, name FROM users WHERE LOWER(username) = %s',
+                             (app_username,), one=True)
+                if user:
+                    execute('UPDATE users SET telegram_id = %s WHERE id = %s',
+                            (chat_id, user['id']))
+                    name = user['name'] or app_username
+                    send_telegram_message(
+                        chat_id,
+                        f"Привет, {name}! 🌿\n\n"
+                        f"Теперь я буду присылать тебе напоминания о поливе и подкормке.\n"
+                        f"Каждое утро в 8:00 по Москве жди сообщение с задачами на день.\n\n"
+                        f"Команды:\n"
+                        f"/help — справка\n"
+                        f"/stop — отключить напоминания"
+                    )
+                    print(f"[TG] Привязан telegram_id={chat_id} к user_id={user['id']}", flush=True)
+                else:
+                    send_telegram_message(
+                        chat_id,
+                        f"Не нашёл пользователя с логином «{app_username}» в приложении «Мой сад».\n"
+                        f"Проверь логин в профиле приложения и нажми «Подключить Telegram» ещё раз."
+                    )
+            else:
+                send_telegram_message(
+                    chat_id,
+                    "Привет! 🌿 Я бот приложения «Мой сад».\n\n"
+                    "Чтобы получать напоминания, открой приложение и нажми «Подключить Telegram» "
+                    "в разделе «Профиль»."
+                )
+
+        elif command == '/stop':
+            execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = %s', (chat_id,))
+            send_telegram_message(
+                chat_id,
+                "Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start."
+            )
+
+        elif command == '/help':
+            send_telegram_message(
+                chat_id,
+                "🌿 Бот приложения «Мой сад»\n\n"
+                "Команды:\n"
+                "/start — приветствие и привязка аккаунта\n"
+                "/stop — отключить напоминания\n"
+                "/help — эта справка"
+            )
+
+        else:
+            send_telegram_message(
+                chat_id,
+                "Я понимаю только команды /start, /stop и /help."
+            )
+
         return 'ok', 200
+
     except Exception as e:
         print(f"[TG] Ошибка webhook: {type(e).__name__}: {e}", flush=True)
-        return f'Error: {e}', 500
+        return 'ok', 200
 
 
 @app.route('/cron/send_reminders', methods=['POST', 'GET'])
 def cron_send_reminders():
-    """Отправляет ежедневные напоминания всем пользователям с привязанным Telegram."""
     secret = request.args.get('secret', '')
     if secret != CRON_SECRET:
         return 'Forbidden', 403
@@ -696,6 +677,7 @@ def cron_send_reminders():
                 icon = {'water': '💧', 'feed': '🧪', 'transplant': '🌱', 'harvest': '🧺'}.get(task['type'], '•')
                 lines.append(f"{icon} {task['message']}")
             text = '\n'.join(lines)
+
         if send_telegram_message(u['telegram_id'], text):
             sent += 1
 
