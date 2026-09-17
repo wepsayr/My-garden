@@ -287,59 +287,66 @@ def geocode_city(city):
         print(f"[GEOCODE] Ошибка: {e}", flush=True)
     return None, None
 
-
 def get_weather_forecast(lat, lon):
-    """Возвращает список из 3 дней прогноза с Open-Meteo."""
+    """Возвращает список из 3 дней прогноза с wttr.in (бесплатно, без ключа)."""
     try:
-        # Приводим к float — psycopg2 может вернуть Decimal, а requests
-        # сериализует его непредсказуемо (иногда с запятой вместо точки).
         lat_f = float(lat)
         lon_f = float(lon)
 
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": lat_f,
-            "longitude": lon_f,
-            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
-            "timezone": "Europe/Moscow",
-            "forecast_days": 3,
-        }
-        print(f"[WEATHER] Запрос: lat={lat_f}, lon={lon_f}", flush=True)
+        # wttr.in принимает координаты в формате "lat,lon"
+        url = f"https://wttr.in/{lat_f},{lon_f}?format=j1&lang=ru"
+        print(f"[WEATHER] Запрос к wttr.in: {url}", flush=True)
 
-        r = requests.get(url, params=params, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; GardenApp/1.0)"
+        }
+        r = requests.get(url, headers=headers, timeout=15)
 
         if r.status_code != 200:
-            print(f"[WEATHER] HTTP {r.status_code}: {r.text[:300]}", flush=True)
+            print(f"[WEATHER] wttr.in HTTP {r.status_code}: {r.text[:300]}", flush=True)
             return []
 
         data = r.json()
 
-        # Open-Meteo может вернуть {"error": true, "reason": "..."}
-        if data.get("error"):
-            print(f"[WEATHER] API вернул ошибку: {data.get('reason')}", flush=True)
-            return []
-
-        daily = data.get("daily") or {}
-        if "time" not in daily or not daily["time"]:
-            print(f"[WEATHER] Нет daily.time в ответе. Ключи: {list(data.keys())}", flush=True)
+        # wttr.in возвращает forecast с ключами date, maxtempC, mintempC, ...
+        forecast = data.get("weather") or []
+        if not forecast:
+            print("[WEATHER] wttr.in вернул пустой weather", flush=True)
             return []
 
         days = []
-        for i in range(len(daily["time"])):
-            code = daily["weathercode"][i]
+        for item in forecast[:3]:  # берём первые 3 дня
+            # Ищем код погоды: в hourly[4] (полдень) лежит weatherCode
+            hourly = item.get("hourly") or []
+            code = 0
+            precip = 0
+            if hourly:
+                midday = hourly[len(hourly) // 2]  # примерно полдень
+                try:
+                    code = int(midday.get("weatherCode", 0))
+                except (TypeError, ValueError):
+                    code = 0
+                # precipitation в мм
+                for h in hourly:
+                    try:
+                        precip += float(h.get("precipMM", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+
             days.append({
-                "date": daily["time"][i],
-                "tmax": daily["temperature_2m_max"][i],
-                "tmin": daily["temperature_2m_min"][i],
-                "precip": daily["precipitation_sum"][i] or 0,
+                "date": item.get("date"),
+                "tmax": float(item.get("maxtempC", 0)),
+                "tmin": float(item.get("mintempC", 0)),
+                "precip": round(precip, 1),
                 "code": code,
                 "desc": WMO_CODES.get(code, "❓"),
             })
-        print(f"[WEATHER] Получено дней: {len(days)}", flush=True)
+
+        print(f"[WEATHER] wttr.in: получено дней {len(days)}", flush=True)
         return days
 
     except Exception as e:
-        print(f"[WEATHER] Исключение: {type(e).__name__}: {e}", flush=True)
+        print(f"[WEATHER] wttr.in исключение: {type(e).__name__}: {e}", flush=True)
         return []
 
 
