@@ -23,9 +23,9 @@
             {% endif %}
         {% endwith %}
 
-        <form method="POST" class="profile-form">
+        <form method="POST" class="profile-form" novalidate>
             <label>Твоё имя:
-                <input type="text" name="name" value="{{ user.name or '' }}" required>
+                <input type="text" name="name" value="{{ user.name or '' }}">
             </label>
 
             <label>Email:
