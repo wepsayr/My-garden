@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Мой сад</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4caf50">
+    <style>
+        /* Баннер установки приложения */
+        .install-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: linear-gradient(135deg, #4caf50, #2e7d32);
+            color: white;
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 20px;
+            cursor: pointer;
+            animation: fadeIn 0.5s ease;
+        }
+        .install-banner .text {
+            flex: 1;
+            font-weight: 500;
+            font-size: 0.95em;
+        }
+        .install-banner .close-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 1.5em;
+            cursor: pointer;
+            padding: 0 5px;
+            line-height: 1;
+        }
+        /* Модальное окно с инструкцией */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.6);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: white;
+            border-radius: 20px;
+            padding: 25px;
+            max-width: 400px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            color: var(--text);
+        }
+        .modal-content h3 {
+            margin-top: 0;
+            color: var(--primary-dark);
+        }
+        .modal-content ol {
+            padding-left: 20px;
+        }
+        .modal-content li {
+            margin-bottom: 8px;
+        }
+        .modal-close {
+            display: block;
+            margin: 20px auto 0;
+            padding: 10px 20px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        /* Кнопки поддержки и уведомлений */
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .support-btn, .notification-btn {
+            display: inline-block;
+            padding: 10px 18px;
+            background: var(--primary);
+            color: white;
+            text-decoration: none;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 0.95em;
+        }
+        .notification-btn:disabled {
+            background: #bdbdbd;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body class="theme-{{ user.theme }}">
+    <div class="container">
+        <!-- Баннер установки приложения (управляется серверным флагом) -->
+        <div class="install-banner" id="installBanner" style="display: {% if user.install_banner_closed %}none{% else %}flex{% endif %};">
+            <span class="text">🌱 Наш сайт можно сделать приложением! Нажми, чтобы узнать как</span>
+            <button class="close-btn" id="closeBanner" title="Закрыть">×</button>
+        </div>
+
+        <h1>🌿 Мой сад</h1>
+        <p class="subtitle">Твой сад сегодня</p>
+
+        <!-- Задачи на сегодня -->
+        <h2>Сегодня нужно</h2>
+        {% if tasks %}
+            <div class="tasks-list">
+                {% for task in tasks %}
+                <div class="plant-task">
+                    <span>
+                        <span class="task-icon">
+                            {% if task.type == 'water' %}💧
+                            {% elif task.type == 'feed' %}🧪
+                            {% elif task.type == 'transplant' %}🌱
+                            {% elif task.type == 'harvest' %}🧺
+                            {% endif %}
+                        </span>
+                        {{ task.message }}
+                    </span>
+                    <form method="POST" action="/plant/{{ task.plant_id }}/{{ task.type }}">
+                        <button type="submit" class="task-btn">Готово ✓</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p>Сегодня задач нет. Можно отдохнуть или добавить новые растения 🌱</p>
+        {% endif %}
+
+        <!-- Сводка -->
+        <div class="stats-grid" style="margin-top: 20px;">
+            <div class="stat-card">
+                <span>🌱 Растений</span>
+                <strong>{{ plants_count }}</strong>
+                <small>в твоём саду</small>
+            </div>
+            <div class="stat-card">
+                <span>📅 Сегодня</span>
+                <strong>{{ tasks|length }}</strong>
+                <small>задач</small>
+            </div>
+        </div>
+
+        <!-- Кнопки поддержки и уведомлений -->
+        <div class="action-buttons">
+            <a href="https://yoomoney.ru/to/4100119622077431" target="_blank" class="support-btn">💖 Поддержать проект</a>
+            <button id="notificationToggleBtn" class="notification-btn" onclick="requestNotificationPermission()">🔔 Включить уведомления</button>
+        </div>
+
+        <!-- Кнопка добавления растения -->
+        <div style="text-align: center; margin-top: 15px;">
+            <a href="/add_plant" style="display: inline-block; padding: 12px 20px; background: var(--primary); color: white; text-decoration: none; border-radius: 12px; font-weight: 600;">➕ Добавить растение</a>
+        </div>
+
+        <nav class="bottom-nav">
+            <a href="/dashboard" class="nav-btn active" title="Главная">🏠</a>
+            <a href="/garden" class="nav-btn" title="Мой сад">🌱</a>
+            <a href="/diary" class="nav-btn" title="Дневник">📝</a>
+            <a href="/calendar" class="nav-btn" title="Календарь">📅</a>
+            <a href="/profile" class="nav-btn" title="Профиль">👤</a>
+            <a href="/logout" class="nav-btn" title="Выйти" onclick="return confirm('Вы точно хотите выйти?');">🚪</a>
+        </nav>
+    </div>
+
+    <!-- Модальное окно с инструкцией по установке -->
+    <div class="modal-overlay" id="installModal">
+        <div class="modal-content">
+            <h3>📲 Установи «Мой сад» как приложение</h3>
+            <p><strong>На Android (Chrome):</strong></p>
+            <ol>
+                <li>Открой меню браузера (три точки справа сверху).</li>
+                <li>Нажми «Установить приложение» или «Добавить на главный экран».</li>
+                <li>Подтверди установку. Иконка появится на рабочем столе.</li>
+            </ol>
+            <p><strong>На iPhone (Safari):</strong></p>
+            <ol>
+                <li>Нажми кнопку «Поделиться» (квадрат со стрелкой вверх).</li>
+                <li>Выбери «На экран «Домой»».</li>
+                <li>Нажми «Добавить». Иконка появится на главном экране.</li>
+            </ol>
+            <p style="font-size:0.9em; color:gray;">После установки приложение будет открываться в полноэкранном режиме и сможет отправлять уведомления.</p>
+            <button class="modal-close" onclick="closeInstallModal()">Понятно</button>
+        </div>
+    </div>
+
+    <script>
+        // Регистрация Service Worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+        }
+
+        // Закрытие баннера (с отправкой на сервер)
+        document.getElementById('closeBanner').addEventListener('click', function(e) {
+            e.stopPropagation();
+            document.getElementById('installBanner').style.display = 'none';
+            fetch('/close_install_banner', { method: 'POST' });
+        });
+
+        // Клик по баннеру открывает инструкцию
+        document.getElementById('installBanner').addEventListener('click', function() {
+            document.getElementById('installModal').style.display = 'flex';
+        });
+
+        function closeInstallModal() {
+            document.getElementById('installModal').style.display = 'none';
+        }
+
+        // Уведомления
+        function requestNotificationPermission() {
+            if (!('Notification' in window)) {
+                alert('Уведомления не поддерживаются этим браузером');
+                return;
+            }
+            Notification.requestPermission().then(permission => {
+                const btn = document.getElementById('notificationToggleBtn');
+                if (permission === 'granted') {
+                    btn.textContent = '🔔 Уведомления включены';
+                    btn.disabled = true;
+                    new Notification('🌿 Мой сад', { body: 'Теперь я буду напоминать о поливе!' });
+                } else if (permission === 'denied') {
+                    btn.textContent = '🔕 Уведомления запрещены';
+                    btn.disabled = true;
+                }
+            });
+        }
+
+        // Проверяем текущий статус уведомлений
+        if ('Notification' in window) {
+            const btn = document.getElementById('notificationToggleBtn');
+            if (Notification.permission === 'granted') {
+                btn.textContent = '🔔 Уведомления включены';
+                btn.disabled = true;
+            } else if (Notification.permission === 'denied') {
+                btn.textContent = '🔕 Уведомления запрещены';
+                btn.disabled = true;
+            }
+        }
+
+        // Напоминание о задачах при загрузке страницы
+        {% if tasks %}
+            if (Notification.permission === 'granted') {
+                setTimeout(() => {
+                    new Notification('🌿 Мой сад', { body: 'У тебя задач на сегодня: {{ tasks|length }} шт.' });
+                }, 3000);
+            }
+        {% endif %}
+    </script>
+</body>
+</html>

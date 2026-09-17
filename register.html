@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Регистрация в Мой сад</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4caf50">
+</head>
+<body class="theme-green">
+    <div class="container">
+        <h1>🌿 Мой сад</h1>
+        <p class="subtitle">Создай аккаунт, чтобы начать</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="ai-tip" style="background: {% if category == 'success' %}#c8e6c9{% else %}#ffcdd2{% endif %}; color: {% if category == 'success' %}#1b5e20{% else %}#b71c1c{% endif %};">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form method="POST" class="profile-form">
+            <label>Придумай логин:
+                <input type="text" name="username" required minlength="3">
+            </label>
+            <label>Email:
+                <input type="email" name="email" required placeholder="you@yandex.ru">
+            </label>
+            <p style="font-size:0.8em; color:gray; margin-top:-5px;">
+                Нужен для восстановления пароля
+            </p>
+            <label>Придумай пароль:
+                <input type="password" name="password" required minlength="4">
+            </label>
+            <p style="font-size:0.8em; color:gray;">Пароль не короче 4 символов</p>
+            <button type="submit" class="btn-primary">Продолжить</button>
+        </form>
+
+        <p style="text-align: center; margin-top: 20px;">
+            Уже есть аккаунт? <a href="/login" style="color: var(--primary);">Войти</a>
+        </p>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+        }
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    </script>
+</body>
+</html>
