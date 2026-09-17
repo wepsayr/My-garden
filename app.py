@@ -259,7 +259,6 @@ def send_reset_email(to_email, reset_link):
         return False
 
 
-# ---------- Погода (Open-Meteo) ----------
 WMO_CODES = {
     0: "☀️ Ясно", 1: "🌤 Малооблачно", 2: "⛅ Облачно", 3: "☁️ Пасмурно",
     45: "🌫 Туман", 48: "🌫 Туман",
@@ -268,6 +267,58 @@ WMO_CODES = {
     71: "🌨 Снег", 73: "🌨 Снег", 75: "🌨 Сильный снег",
     80: "🌦 Ливень", 81: "🌦 Ливень", 82: "🌧 Сильный ливень",
     95: "⛈ Гроза", 96: "⛈ Гроза с градом", 99: "⛈ Сильная гроза",
+}
+
+# Коды погоды wttr.in (World Weather codes, WW)
+WW_CODES = {
+    113: "☀️ Ясно",
+    116: "🌤 Переменная облачность",
+    119: "⛅ Облачно",
+    122: "☁️ Пасмурно",
+    143: "🌫 Туман",
+    176: "🌦 Местами дождь",
+    179: "🌨 Местами снег",
+    182: "🌨 Местами мокрый снег",
+    185: "🌧 Морось",
+    200: "⛈ Гроза",
+    227: "🌨 Позёмок",
+    230: "🌨 Метель",
+    248: "🌫 Туман",
+    260: "🌫 Ледяной туман",
+    263: "🌦 Мелкая морось",
+    266: "🌦 Морось",
+    281: "🌧 Ледяная морось",
+    284: "🌧 Сильная ледяная морось",
+    293: "🌦 Местами слабый дождь",
+    296: "🌦 Слабый дождь",
+    299: "🌧 Умеренный дождь",
+    302: "🌧 Умеренный дождь",
+    305: "🌧 Сильный дождь",
+    308: "🌧 Сильный дождь",
+    311: "🌧 Ледяной дождь",
+    314: "🌧 Сильный ледяной дождь",
+    317: "🌨 Мокрый снег",
+    320: "🌨 Сильный мокрый снег",
+    323: "🌨 Местами слабый снег",
+    326: "🌨 Слабый снег",
+    329: "🌨 Умеренный снег",
+    332: "🌨 Умеренный снег",
+    335: "🌨 Сильный снег",
+    338: "🌨 Сильный снег",
+    350: "🌨 Ледяная крупа",
+    353: "🌦 Небольшой ливень",
+    356: "🌧 Сильный ливень",
+    359: "🌧 Проливной дождь",
+    362: "🌨 Ливень с мокрым снегом",
+    365: "🌨 Сильный ливень с мокрым снегом",
+    368: "🌨 Небольшой снегопад",
+    371: "🌨 Сильный снегопад",
+    374: "🌨 Ливень с ледяной крупой",
+    377: "🌨 Сильный ливень с ледяной крупой",
+    386: "⛈ Дождь с грозой",
+    389: "⛈ Сильный дождь с грозой",
+    392: "⛈ Снег с грозой",
+    395: "⛈ Сильный снег с грозой",
 }
 
 
@@ -293,7 +344,6 @@ def get_weather_forecast(lat, lon):
         lat_f = float(lat)
         lon_f = float(lon)
 
-        # wttr.in принимает координаты в формате "lat,lon"
         url = f"https://wttr.in/{lat_f},{lon_f}?format=j1&lang=ru"
         print(f"[WEATHER] Запрос к wttr.in: {url}", flush=True)
 
@@ -308,25 +358,22 @@ def get_weather_forecast(lat, lon):
 
         data = r.json()
 
-        # wttr.in возвращает forecast с ключами date, maxtempC, mintempC, ...
         forecast = data.get("weather") or []
         if not forecast:
             print("[WEATHER] wttr.in вернул пустой weather", flush=True)
             return []
 
         days = []
-        for item in forecast[:3]:  # берём первые 3 дня
-            # Ищем код погоды: в hourly[4] (полдень) лежит weatherCode
+        for item in forecast[:3]:
             hourly = item.get("hourly") or []
             code = 0
             precip = 0
             if hourly:
-                midday = hourly[len(hourly) // 2]  # примерно полдень
+                midday = hourly[len(hourly) // 2]
                 try:
                     code = int(midday.get("weatherCode", 0))
                 except (TypeError, ValueError):
                     code = 0
-                # precipitation в мм
                 for h in hourly:
                     try:
                         precip += float(h.get("precipMM", 0) or 0)
@@ -339,10 +386,10 @@ def get_weather_forecast(lat, lon):
                 "tmin": float(item.get("mintempC", 0)),
                 "precip": round(precip, 1),
                 "code": code,
-                "desc": WMO_CODES.get(code, "❓"),
+                "desc": WW_CODES.get(code, "❓"),  # ← вот здесь ключевое изменение
             })
 
-        print(f"[WEATHER] wttr.in: получено дней {len(days)}", flush=True)
+        print(f"[WEATHER] wttr.in: получено дней {len(days)}, коды: {[d['code'] for d in days]}", flush=True)
         return days
 
     except Exception as e:
