@@ -1,10 +1,13 @@
 import os
+import io
+import base64
 import secrets
 import requests
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
+from PIL import Image
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -14,21 +17,13 @@ app.permanent_session_lifetime = timedelta(days=365)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
-DATA_DIR = os.environ.get('DATA_DIR', 'data')
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
 
 # ---------- Работа с БД ----------
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         db = g._database = psycopg2.connect(DATABASE_URL, connect_timeout=10)
-        db.autocommit = True  # каждый запрос — своя транзакция, ошибка не ломает сессию
+        db.autocommit = True
     return db
 
 
@@ -89,6 +84,12 @@ def init_db():
                     priority TEXT,
                     theme TEXT DEFAULT 'green',
                     install_banner_closed INTEGER DEFAULT 0,
+                    city TEXT,
+                    lat REAL,
+                    lon REAL,
+                    current_streak INTEGER DEFAULT 0,
+                    best_streak INTEGER DEFAULT 0,
+                    last_active_date DATE,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
@@ -139,6 +140,21 @@ def init_db():
         finally:
             cur.close()
 
+        # --- Миграции: добавляем новые колонки, если БД создавалась раньше ---
+        # Postgres поддерживает ADD COLUMN IF NOT EXISTS, так что это безопасно.
+        for sql in [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS lat REAL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS lon REAL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS best_streak INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_date DATE",
+        ]:
+            try:
+                execute(sql)
+            except Exception as e:
+                print(f"[MIGRATE] {e}", flush=True)
+
         row = query('SELECT COUNT(*) AS c FROM plants_catalog', one=True)
         if row and row['c'] == 0:
             catalog = [
@@ -169,7 +185,7 @@ def init_db():
 
 @app.before_request
 def before_request():
-    init_db()  # быстрый выход, если уже инициализирован
+    init_db()
     session.permanent = True
 
 
@@ -235,6 +251,117 @@ def send_reset_email(to_email, reset_link):
     except Exception as e:
         print(f"[MAIL] Ошибка отправки: {e}", flush=True)
         return False
+
+
+# ---------- Погода (Open-Meteo) ----------
+WMO_CODES = {
+    0: "☀️ Ясно", 1: "🌤 Малооблачно", 2: "⛅ Облачно", 3: "☁️ Пасмурно",
+    45: "🌫 Туман", 48: "🌫 Туман",
+    51: "🌦 Морось", 53: "🌦 Морось", 55: "🌦 Морось",
+    61: "🌧 Дождь", 63: "🌧 Дождь", 65: "🌧 Сильный дождь",
+    71: "🌨 Снег", 73: "🌨 Снег", 75: "🌨 Сильный снег",
+    80: "🌦 Ливень", 81: "🌦 Ливень", 82: "🌧 Сильный ливень",
+    95: "⛈ Гроза", 96: "⛈ Гроза с градом", 99: "⛈ Сильная гроза",
+}
+
+
+def geocode_city(city):
+    """Возвращает (lat, lon) по названию города или (None, None)."""
+    try:
+        r = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": city, "count": 1, "language": "ru"},
+            timeout=10
+        )
+        data = r.json()
+        if data.get("results"):
+            res = data["results"][0]
+            return res["latitude"], res["longitude"]
+    except Exception as e:
+        print(f"[GEOCODE] Ошибка: {e}", flush=True)
+    return None, None
+
+
+def get_weather_forecast(lat, lon):
+    """Возвращает список из 3 дней прогноза."""
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat, "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
+                "timezone": "auto",
+                "forecast_days": 3
+            },
+            timeout=10
+        )
+        data = r.json()
+        daily = data.get("daily", {})
+        days = []
+        for i in range(len(daily.get("time", []))):
+            days.append({
+                "date": daily["time"][i],
+                "tmax": daily["temperature_2m_max"][i],
+                "tmin": daily["temperature_2m_min"][i],
+                "precip": daily["precipitation_sum"][i] or 0,
+                "code": daily["weathercode"][i],
+                "desc": WMO_CODES.get(daily["weathercode"][i], "❓"),
+            })
+        return days
+    except Exception as e:
+        print(f"[WEATHER] Ошибка: {e}", flush=True)
+        return []
+
+
+def get_weather_advice(days):
+    """Генерирует список подсказок на основе прогноза."""
+    if not days:
+        return []
+    advice = []
+    today = days[0] if len(days) > 0 else None
+    tomorrow = days[1] if len(days) > 1 else None
+
+    if tomorrow and tomorrow["precip"] and tomorrow["precip"] > 3:
+        advice.append("🌧 Завтра дождь — можно не поливать")
+    if today and today["tmax"] is not None and today["tmax"] > 30:
+        advice.append("🔥 Жара — полей растения дважды")
+    if today and today["tmin"] is not None and today["tmin"] < 5:
+        advice.append("❄️ Холодная ночь — укрой теплолюбивые растения")
+    if today and today["tmax"] is not None and today["tmax"] < 10:
+        advice.append("🥶 Холодно — поливай реже обычного")
+
+    return advice
+
+
+# ---------- Streak (серия) ----------
+def update_streak(user_id):
+    """Обновляет серию дней с активностью."""
+    user = query('SELECT current_streak, best_streak, last_active_date FROM users WHERE id = %s',
+                 (user_id,), one=True)
+    if not user:
+        return
+
+    today = date.today()
+    last = user['last_active_date']
+    if isinstance(last, str):
+        last = datetime.strptime(last[:10], '%Y-%m-%d').date()
+
+    current = user['current_streak'] or 0
+    best = user['best_streak'] or 0
+
+    if last == today:
+        return  # уже отмечались сегодня
+
+    if last and (today - last).days == 1:
+        current += 1
+    else:
+        current = 1
+
+    if current > best:
+        best = current
+
+    execute('UPDATE users SET current_streak=%s, best_streak=%s, last_active_date=%s WHERE id=%s',
+            (current, best, today.isoformat(), user_id))
 
 
 # ---------- Вспомогательные функции ----------
@@ -348,7 +475,6 @@ CARE_TIPS = {
 # ---------- Маршруты ----------
 @app.route('/healthz')
 def healthz():
-    """Пинг для cron-job / UptimeRobot. Дёшево, без обращения к БД."""
     return 'ok', 200
 
 
@@ -365,7 +491,16 @@ def dashboard():
         return redirect(url_for('login'))
     tasks = get_today_tasks(user['id'])
     plants_count = len(get_user_plants(user['id']))
-    return render_template('index.html', user=user, tasks=tasks, plants_count=plants_count)
+
+    # Погода
+    weather = []
+    weather_advice = []
+    if user['lat'] and user['lon']:
+        weather = get_weather_forecast(user['lat'], user['lon'])
+        weather_advice = get_weather_advice(weather)
+
+    return render_template('index.html', user=user, tasks=tasks, plants_count=plants_count,
+                           weather=weather, weather_advice=weather_advice)
 
 
 @app.route('/close_install_banner', methods=['POST'])
@@ -543,6 +678,76 @@ def garden():
     return render_template('garden.html', user=user, plants=plants, care_tips=CARE_TIPS)
 
 
+@app.route('/plant/<int:plant_id>')
+def plant_detail(plant_id):
+    user = get_user()
+    if not user:
+        return redirect(url_for('login'))
+    plant = query('''SELECT up.*, pc.name, pc.plant_type, pc.watering_frequency,
+                            pc.feeding_frequency, pc.transplant_days, pc.harvest_days
+                     FROM user_plants up
+                     JOIN plants_catalog pc ON up.plant_id = pc.id
+                     WHERE up.id = %s AND up.user_id = %s''',
+                  (plant_id, user['id']), one=True)
+    if not plant:
+        flash('Растение не найдено', 'error')
+        return redirect(url_for('garden'))
+    logs = query('''SELECT * FROM garden_log
+                    WHERE plant_id = %s
+                    ORDER BY action_date DESC LIMIT 30''', (plant_id,))
+    return render_template('plant_detail.html', user=user, plant=plant, logs=logs, care_tips=CARE_TIPS)
+
+
+@app.route('/plant/<int:plant_id>/notes', methods=['POST'])
+def update_plant_notes(plant_id):
+    user = get_user()
+    if not user:
+        return redirect(url_for('login'))
+    notes = request.form.get('notes', '').strip()
+    execute('UPDATE user_plants SET notes = %s WHERE id = %s AND user_id = %s',
+            (notes, plant_id, user['id']))
+    flash('Заметки сохранены', 'success')
+    return redirect(url_for('plant_detail', plant_id=plant_id))
+
+
+@app.route('/plant/<int:plant_id>/photo', methods=['POST'])
+def upload_plant_photo(plant_id):
+    user = get_user()
+    if not user:
+        return redirect(url_for('login'))
+    file = request.files.get('photo')
+    if not file or file.filename == '':
+        flash('Файл не выбран', 'error')
+        return redirect(url_for('plant_detail', plant_id=plant_id))
+    try:
+        img = Image.open(file.stream)
+        # Приводим к RGB (чтобы JPEG точно сохранился)
+        if img.mode in ('RGBA', 'P', 'LA'):
+            img = img.convert('RGB')
+        # Ресайз: длинная сторона — максимум 800px
+        img.thumbnail((800, 800))
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=80, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+        execute('UPDATE user_plants SET photo = %s WHERE id = %s AND user_id = %s',
+                (b64, plant_id, user['id']))
+        flash('Фото загружено 🌿', 'success')
+    except Exception as e:
+        flash(f'Ошибка загрузки фото: {e}', 'error')
+    return redirect(url_for('plant_detail', plant_id=plant_id))
+
+
+@app.route('/plant/<int:plant_id>/photo/delete', methods=['POST'])
+def delete_plant_photo(plant_id):
+    user = get_user()
+    if not user:
+        return redirect(url_for('login'))
+    execute('UPDATE user_plants SET photo = NULL WHERE id = %s AND user_id = %s',
+            (plant_id, user['id']))
+    flash('Фото удалено', 'success')
+    return redirect(url_for('plant_detail', plant_id=plant_id))
+
+
 @app.route('/plant/<int:plant_id>/water', methods=['POST'])
 def water_plant(plant_id):
     user = get_user()
@@ -550,7 +755,8 @@ def water_plant(plant_id):
         return redirect(url_for('login'))
     execute('UPDATE user_plants SET last_watered = %s WHERE id = %s AND user_id = %s',
             (date.today().isoformat(), plant_id, user['id']))
-    return redirect(url_for('garden'))
+    update_streak(user['id'])
+    return redirect(request.referrer or url_for('garden'))
 
 
 @app.route('/plant/<int:plant_id>/feed', methods=['POST'])
@@ -560,7 +766,8 @@ def feed_plant(plant_id):
         return redirect(url_for('login'))
     execute('UPDATE user_plants SET last_fed = %s WHERE id = %s AND user_id = %s',
             (date.today().isoformat(), plant_id, user['id']))
-    return redirect(url_for('garden'))
+    update_streak(user['id'])
+    return redirect(request.referrer or url_for('garden'))
 
 
 @app.route('/plant/<int:plant_id>/transplant', methods=['POST'])
@@ -570,7 +777,8 @@ def transplant_plant(plant_id):
         return redirect(url_for('login'))
     execute('INSERT INTO garden_log (user_id, plant_id, action, action_date, note) VALUES (%s,%s,%s,%s,%s)',
             (user['id'], plant_id, 'пересадка', date.today().isoformat(), 'Пересажено'))
-    return redirect(url_for('garden'))
+    update_streak(user['id'])
+    return redirect(request.referrer or url_for('garden'))
 
 
 @app.route('/plant/<int:plant_id>/schedule', methods=['POST'])
@@ -584,7 +792,7 @@ def update_plant_schedule(plant_id):
             (int(water_interval) if water_interval else None,
              int(feed_interval) if feed_interval else None,
              plant_id, user['id']))
-    return redirect(url_for('garden'))
+    return redirect(url_for('plant_detail', plant_id=plant_id))
 
 
 @app.route('/plant/<int:plant_id>/delete', methods=['POST'])
@@ -654,6 +862,7 @@ def profile():
         name = request.form.get('name', '').strip()
         theme = request.form.get('theme', 'green')
         email = request.form.get('email', '').strip().lower()
+        city = request.form.get('city', '').strip()
 
         if email:
             if '@' not in email:
@@ -665,8 +874,18 @@ def profile():
                 flash('Этот email уже привязан к другому аккаунту', 'error')
                 return redirect(url_for('profile'))
 
-        execute('UPDATE users SET name=%s, theme=%s, email=%s WHERE id=%s',
-                (name, theme, email or None, user['id']))
+        # Геокодируем город, если он изменился
+        old_city = user['city'] or ''
+        if city and city != old_city:
+            lat, lon = geocode_city(city)
+            if lat and lon:
+                execute('UPDATE users SET lat=%s, lon=%s WHERE id=%s', (lat, lon, user['id']))
+            else:
+                flash(f'Не удалось найти город «{city}» — попробуй написать по-другому', 'error')
+                city = old_city
+
+        execute('UPDATE users SET name=%s, theme=%s, email=%s, city=%s WHERE id=%s',
+                (name, theme, email or None, city or None, user['id']))
         flash('Профиль сохранён', 'success')
         return redirect(url_for('profile'))
     return render_template('profile.html', user=user)
