@@ -289,33 +289,57 @@ def geocode_city(city):
 
 
 def get_weather_forecast(lat, lon):
-    """Возвращает список из 3 дней прогноза."""
+    """Возвращает список из 3 дней прогноза с Open-Meteo."""
     try:
-        r = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat, "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
-                "timezone": "auto",
-                "forecast_days": 3
-            },
-            timeout=10
-        )
+        # Приводим к float — psycopg2 может вернуть Decimal, а requests
+        # сериализует его непредсказуемо (иногда с запятой вместо точки).
+        lat_f = float(lat)
+        lon_f = float(lon)
+
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat_f,
+            "longitude": lon_f,
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
+            "timezone": "Europe/Moscow",
+            "forecast_days": 3,
+        }
+        print(f"[WEATHER] Запрос: lat={lat_f}, lon={lon_f}", flush=True)
+
+        r = requests.get(url, params=params, timeout=10)
+
+        if r.status_code != 200:
+            print(f"[WEATHER] HTTP {r.status_code}: {r.text[:300]}", flush=True)
+            return []
+
         data = r.json()
-        daily = data.get("daily", {})
+
+        # Open-Meteo может вернуть {"error": true, "reason": "..."}
+        if data.get("error"):
+            print(f"[WEATHER] API вернул ошибку: {data.get('reason')}", flush=True)
+            return []
+
+        daily = data.get("daily") or {}
+        if "time" not in daily or not daily["time"]:
+            print(f"[WEATHER] Нет daily.time в ответе. Ключи: {list(data.keys())}", flush=True)
+            return []
+
         days = []
-        for i in range(len(daily.get("time", []))):
+        for i in range(len(daily["time"])):
+            code = daily["weathercode"][i]
             days.append({
                 "date": daily["time"][i],
                 "tmax": daily["temperature_2m_max"][i],
                 "tmin": daily["temperature_2m_min"][i],
                 "precip": daily["precipitation_sum"][i] or 0,
-                "code": daily["weathercode"][i],
-                "desc": WMO_CODES.get(daily["weathercode"][i], "❓"),
+                "code": code,
+                "desc": WMO_CODES.get(code, "❓"),
             })
+        print(f"[WEATHER] Получено дней: {len(days)}", flush=True)
         return days
+
     except Exception as e:
-        print(f"[WEATHER] Ошибка: {e}", flush=True)
+        print(f"[WEATHER] Исключение: {type(e).__name__}: {e}", flush=True)
         return []
 
 
