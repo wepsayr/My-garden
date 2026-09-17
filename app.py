@@ -16,13 +16,17 @@ except Exception as e:
     print(f"[IMG] HEIC поддержка недоступна: {e}", flush=True)
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'garden_secret_key_change_me')
 app.permanent_session_lifetime = timedelta(days=365)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
-
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+CRON_SECRET = os.environ.get('CRON_SECRET', 'change-me-cron-secret')
 
 # ---------- Работа с БД ----------
 def get_db():
@@ -65,6 +69,83 @@ def execute(sql, args=(), returning=False):
 
 _db_initialized = False
 
+# ---------- Telegram Bot ----------
+telegram_app = None
+
+def get_telegram_app():
+    """Ленивая инициализация Telegram Application."""
+    global telegram_app
+    if telegram_app is None and TELEGRAM_BOT_TOKEN:
+        telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        telegram_app.add_handler(CommandHandler("start", tg_start))
+        telegram_app.add_handler(CommandHandler("help", tg_help))
+        telegram_app.add_handler(CommandHandler("stop", tg_stop))
+        print("[TG] Telegram Application инициализирован", flush=True)
+    return telegram_app
+
+
+async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка команды /start."""
+    chat_id = update.effective_chat.id
+    username = update.effective_user.username or update.effective_user.first_name
+    print(f"[TG] /start от chat_id={chat_id}, username={username}", flush=True)
+
+    # Привязываем chat_id к пользователю, если он ввёл команду с параметром
+    # Формат: /start <username_в_приложении>
+    # Например: /start natasha
+    if context.args:
+        app_username = context.args[0].strip()
+        user = query('SELECT id, name FROM users WHERE username = %s', (app_username,), one=True)
+        if user:
+            execute('UPDATE users SET telegram_id = %s WHERE id = %s', (chat_id, user['id']))
+            name = user['name'] or app_username
+            await update.message.reply_text(
+                f"Привет, {name}! 🌿\n\n"
+                f"Теперь я буду присылать тебе напоминания о поливе и подкормке.\n"
+                f"Каждое утро в 8:00 по Москве жди сообщение с задачами на день."
+            )
+            return
+
+    await update.message.reply_text(
+        "Привет! 🌿 Я бот приложения «Мой сад».\n\n"
+        "Чтобы получать напоминания, перейди в приложение по ссылке:\n"
+        "https://my-garden-zgn7.onrender.com/profile\n\n"
+        "Там нажми «Подключить Telegram» — и я привяжу твой аккаунт."
+    )
+
+
+async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Я бот приложения «Мой сад» 🌿\n\n"
+        "Команды:\n"
+        "/start — приветствие и привязка аккаунта\n"
+        "/stop — отключить напоминания\n"
+        "/help — эта справка"
+    )
+
+
+async def tg_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = %s', (chat_id,))
+    await update.message.reply_text("Хорошо, больше не буду присылать напоминания. Если захочешь вернуть — напиши /start.")
+
+
+def send_telegram_message(chat_id, text):
+    """Синхронная отправка сообщения через HTTP API Telegram."""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        r = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }, timeout=10)
+        if r.status_code == 200:
+            return True
+        print(f"[TG] Ошибка отправки: {r.status_code} — {r.text[:200]}", flush=True)
+        return False
+    except Exception as e:
+        print(f"[TG] Исключение при отправке: {e}", flush=True)
+        return False
 
 def init_db():
     """Создаёт таблицы и наполняет каталог. Выполняется один раз за процесс."""
@@ -155,6 +236,7 @@ def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS best_streak INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_date DATE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT UNIQUE",
         ]:
             try:
                 execute(sql)
@@ -621,6 +703,58 @@ CARE_TIPS = {
 def healthz():
     return 'ok', 200
 
+@app.route('/telegram/webhook', methods=['POST'])
+def telegram_webhook():
+    """Принимает обновления от Telegram."""
+    telegram_app = get_telegram_app()
+    if not telegram_app:
+        return 'Bot not configured', 503
+
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+
+        # Запускаем обработку в новом event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(telegram_app.process_update(update))
+        loop.close()
+
+        return 'ok', 200
+    except Exception as e:
+        print(f"[TG] Ошибка webhook: {e}", flush=True)
+        return f'Error: {e}', 500
+
+@app.route('/cron/send_reminders', methods=['POST', 'GET'])
+def cron_send_reminders():
+    """Отправляет ежедневные напоминания всем пользователям с привязанным Telegram."""
+    # Простая защита: секретный параметр
+    secret = request.args.get('secret', '')
+    if secret != CRON_SECRET:
+        return 'Forbidden', 403
+
+    users = query('SELECT id, name, telegram_id, city FROM users WHERE telegram_id IS NOT NULL')
+    if not users:
+        return 'No users with Telegram', 200
+
+    sent = 0
+    for user in users:
+        tasks = get_today_tasks(user['id'])
+        if not tasks:
+            # Можно отправить короткое сообщение или пропустить
+            text = f"🌿 Привет, {user['name'] or 'садовод'}!\n\nСегодня задач нет. Отдыхай или добавь новые растения!"
+        else:
+            lines = [f"🌿 Доброе утро, {user['name'] or 'садовод'}!\n", "Сегодня нужно:"]
+            for task in tasks:
+                icon = {'water': '💧', 'feed': '🧪', 'transplant': '🌱', 'harvest': '🧺'}.get(task['type'], '•')
+                lines.append(f"{icon} {task['message']}")
+            text = '\n'.join(lines)
+
+        if send_telegram_message(user['telegram_id'], text):
+            sent += 1
+
+    print(f"[TG] Отправлено напоминаний: {sent}", flush=True)
+    return f'Sent: {sent}', 200
 
 @app.route('/')
 def splash():
