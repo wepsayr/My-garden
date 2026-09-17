@@ -27,7 +27,8 @@ if not os.path.exists(UPLOAD_FOLDER):
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
-        db = g._database = psycopg2.connect(DATABASE_URL)
+        db = g._database = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        db.autocommit = True  # каждый запрос — своя транзакция, ошибка не ломает сессию
     return db
 
 
@@ -54,7 +55,6 @@ def execute(sql, args=(), returning=False):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(sql, args)
-        db.commit()
         if returning and cur.description is not None:
             return cur.fetchone()
         return None
@@ -62,76 +62,85 @@ def execute(sql, args=(), returning=False):
         cur.close()
 
 
+_db_initialized = False
+
+
 def init_db():
+    """Создаёт таблицы и наполняет каталог. Выполняется один раз за процесс."""
+    global _db_initialized
+    if _db_initialized:
+        return
+
     with app.app_context():
         db = get_db()
         cur = db.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE,
-                password_hash TEXT,
-                email TEXT UNIQUE,
-                name TEXT,
-                gender TEXT,
-                experience TEXT,
-                growing_plants TEXT,
-                location TEXT,
-                priority TEXT,
-                theme TEXT DEFAULT 'green',
-                install_banner_closed INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS plants_catalog (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                plant_type TEXT,
-                watering_frequency INTEGER DEFAULT 1,
-                feeding_frequency INTEGER DEFAULT 14,
-                transplant_days INTEGER DEFAULT 30,
-                harvest_days INTEGER DEFAULT 60
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS user_plants (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id),
-                plant_id INTEGER REFERENCES plants_catalog(id),
-                planted_date DATE,
-                location TEXT,
-                last_watered DATE,
-                last_fed DATE,
-                notes TEXT,
-                photo TEXT,
-                water_interval_override INTEGER,
-                feed_interval_override INTEGER
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS garden_log (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id),
-                plant_id INTEGER REFERENCES user_plants(id),
-                action TEXT,
-                action_date DATE,
-                note TEXT
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS password_reset_tokens (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id),
-                token TEXT UNIQUE,
-                expires_at TIMESTAMP
-            )
-        ''')
-        db.commit()
-        cur.close()
+        try:
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE,
+                    password_hash TEXT,
+                    email TEXT UNIQUE,
+                    name TEXT,
+                    gender TEXT,
+                    experience TEXT,
+                    growing_plants TEXT,
+                    location TEXT,
+                    priority TEXT,
+                    theme TEXT DEFAULT 'green',
+                    install_banner_closed INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS plants_catalog (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    plant_type TEXT,
+                    watering_frequency INTEGER DEFAULT 1,
+                    feeding_frequency INTEGER DEFAULT 14,
+                    transplant_days INTEGER DEFAULT 30,
+                    harvest_days INTEGER DEFAULT 60
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS user_plants (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id),
+                    plant_id INTEGER REFERENCES plants_catalog(id),
+                    planted_date DATE,
+                    location TEXT,
+                    last_watered DATE,
+                    last_fed DATE,
+                    notes TEXT,
+                    photo TEXT,
+                    water_interval_override INTEGER,
+                    feed_interval_override INTEGER
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS garden_log (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id),
+                    plant_id INTEGER REFERENCES user_plants(id),
+                    action TEXT,
+                    action_date DATE,
+                    note TEXT
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id),
+                    token TEXT UNIQUE,
+                    expires_at TIMESTAMP
+                )
+            ''')
+        finally:
+            cur.close()
 
-        count = query('SELECT COUNT(*) AS c FROM plants_catalog', one=True)['c']
-        if count == 0:
+        row = query('SELECT COUNT(*) AS c FROM plants_catalog', one=True)
+        if row and row['c'] == 0:
             catalog = [
                 ('Огурцы', 'овощи', 1, 10, 25, 50),
                 ('Помидоры', 'овощи', 2, 14, 30, 70),
@@ -155,10 +164,12 @@ def init_db():
                     'INSERT INTO plants_catalog (name, plant_type, watering_frequency, feeding_frequency, transplant_days, harvest_days) VALUES (%s,%s,%s,%s,%s,%s)',
                     (name, ptype, wf, ff, td, hd))
 
+        _db_initialized = True
+
 
 @app.before_request
 def before_request():
-    init_db()
+    init_db()  # быстрый выход, если уже инициализирован
     session.permanent = True
 
 
@@ -335,6 +346,12 @@ CARE_TIPS = {
 
 
 # ---------- Маршруты ----------
+@app.route('/healthz')
+def healthz():
+    """Пинг для cron-job / UptimeRobot. Дёшево, без обращения к БД."""
+    return 'ok', 200
+
+
 @app.route('/')
 def splash():
     user = get_user()
