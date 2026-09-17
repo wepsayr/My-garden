@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Дневник — Мой сад</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4caf50">
+    <style>
+        .log-item {
+            background: var(--light-bg);
+            border-radius: 12px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+        .log-date {
+            font-size: 0.85em;
+            color: var(--text);
+            opacity: 0.8;
+        }
+        .log-note {
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        .add-note-form {
+            background: var(--light-bg);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body class="theme-{{ user.theme }}">
+    <div class="container">
+        <h1>📝 Дневник садовода</h1>
+        <a href="/dashboard" class="back-link">← На главную</a>
+
+        <div class="add-note-form">
+            <h3>Новая заметка</h3>
+            <form method="POST" action="/diary/add">
+                <label>Выбери растение (необязательно):
+                    <select name="plant_id">
+                        <option value="">— Без растения —</option>
+                        {% for plant in plants %}
+                            <option value="{{ plant.id }}">{{ plant.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label>Заметка:
+                    <textarea name="note" rows="3" required placeholder="Например, не хватает солнца, пересадила в горшок побольше"></textarea>
+                </label>
+                <button type="submit" class="btn-primary">Добавить запись</button>
+            </form>
+        </div>
+
+        {% if logs %}
+            <div class="log-list">
+                {% for log in logs %}
+                <div class="log-item">
+                    <div class="log-date">{{ log.action_date }}{% if log.plant_name %} · {{ log.plant_name }}{% endif %}</div>
+                    <div class="log-note">{{ log.note }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p style="text-align: center; margin-top: 30px;">Заметок пока нет. Добавь первую!</p>
+        {% endif %}
+
+        <nav class="bottom-nav">
+            <a href="/dashboard" class="nav-btn" title="Главная">🏠</a>
+            <a href="/garden" class="nav-btn" title="Мой сад">🌱</a>
+            <a href="/diary" class="nav-btn active" title="Дневник">📝</a>
+            <a href="/calendar" class="nav-btn" title="Календарь">📅</a>
+            <a href="/profile" class="nav-btn" title="Профиль">👤</a>
+            <a href="/logout" class="nav-btn" title="Выйти" onclick="return confirm('Вы точно хотите выйти?');">🚪</a>
+        </nav>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+        }
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    </script>
+</body>
+</html>

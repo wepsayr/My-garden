@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход в Мой сад</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4caf50">
+</head>
+<body class="theme-green">
+    <div class="container">
+        <h1>🌿 Мой сад</h1>
+        <p class="subtitle">Войди, чтобы заботиться о своих растениях</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="ai-tip" style="background: {% if category == 'success' %}#c8e6c9{% else %}#ffcdd2{% endif %}; color: {% if category == 'success' %}#1b5e20{% else %}#b71c1c{% endif %};">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form method="POST" class="profile-form">
+            <label>Логин:
+                <input type="text" name="username" required>
+            </label>
+            <label>Пароль:
+                <input type="password" name="password" required>
+            </label>
+            <button type="submit" class="btn-primary">Войти</button>
+        </form>
+
+        <p style="text-align: center; margin-top: 15px;">
+            <a href="/forgot_password" style="color: var(--primary); font-size: 0.95em;">Забыли пароль?</a>
+        </p>
+        <p style="text-align: center; margin-top: 10px;">
+            Нет аккаунта? <a href="/register" style="color: var(--primary);">Зарегистрироваться</a>
+        </p>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+        }
+    </script>
+</body>
+</html>

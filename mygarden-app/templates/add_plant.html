@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Добавить растение — Мой сад</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4caf50">
+    <style>
+        .care-tip-preview {
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+        .schedule-row {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        .schedule-row label {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            font-size: 0.9em;
+        }
+        .schedule-row input {
+            width: 70px;
+            padding: 6px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body class="theme-{{ user.theme }}">
+    <div class="container">
+        <h1>➕ Добавить растение</h1>
+        <a href="/dashboard" class="back-link">← На главную</a>
+
+        <form method="POST" class="profile-form">
+            <label>Выбери растение из списка:
+                <select name="plant_id" id="plantSelect">
+                    <option value="">— Выбери —</option>
+                    {% for plant in catalog %}
+                        <option value="{{ plant.id }}">{{ plant.name }} ({{ plant.plant_type }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+
+            <div id="careTip" class="care-tip-preview" style="display:none;"></div>
+
+            <label>Или укажи своё:
+                <input type="text" name="custom_name" placeholder="Например, базилик">
+            </label>
+
+            <label>Дата посадки:
+                <input type="date" name="planted_date" required>
+            </label>
+
+            <label>Где растёт:
+                <select name="location">
+                    <option value="Открытый грунт">Открытый грунт</option>
+                    <option value="Подоконник/балкон">Подоконник/балкон</option>
+                    <option value="Теплица">Теплица</option>
+                </select>
+            </label>
+
+            <div class="schedule-row">
+                <label>Полив (дней):
+                    <input type="number" name="water_interval" min="1" placeholder="Авто">
+                </label>
+                <label>Подкормка (дней):
+                    <input type="number" name="feed_interval" min="1" placeholder="Авто">
+                </label>
+            </div>
+            <p style="font-size:0.8em; color:gray;">Если оставить пусто, будут использованы стандартные интервалы.</p>
+
+            <label>Заметки:
+                <textarea name="notes" rows="3" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:8px;"></textarea>
+            </label>
+
+            <button type="submit" class="btn-primary">Добавить 🌱</button>
+        </form>
+
+        <nav class="bottom-nav">
+            <a href="/dashboard" class="nav-btn" title="Главная">🏠</a>
+            <a href="/garden" class="nav-btn" title="Мой сад">🌱</a>
+            <a href="/diary" class="nav-btn" title="Дневник">📝</a>
+            <a href="/calendar" class="nav-btn" title="Календарь">📅</a>
+            <a href="/profile" class="nav-btn" title="Профиль">👤</a>
+            <a href="/logout" class="nav-btn" title="Выйти" onclick="return confirm('Вы точно хотите выйти?');">🚪</a>
+        </nav>
+    </div>
+
+    <script>
+        // Показываем подсказку по уходу при выборе растения
+        const plantSelect = document.getElementById('plantSelect');
+        const careTips = {{ care_tips | tojson }};
+        const careTipDiv = document.getElementById('careTip');
+
+        plantSelect.addEventListener('change', function() {
+            const selectedName = this.options[this.selectedIndex].text.split(' (')[0];
+            if (selectedName && careTips[selectedName]) {
+                careTipDiv.textContent = '💡 ' + careTips[selectedName];
+                careTipDiv.style.display = 'block';
+            } else {
+                careTipDiv.style.display = 'none';
+            }
+        });
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+        }
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    </script>
+</body>
+</html>
