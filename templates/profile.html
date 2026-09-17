@@ -7,6 +7,55 @@
     <link rel="stylesheet" href="/static/style.css">
     <link rel="manifest" href="/static/manifest.json">
     <meta name="theme-color" content="#4caf50">
+    <style>
+        .telegram-box {
+            background: linear-gradient(135deg, #e3f2fd, #bbdefb);
+            border-radius: 16px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+            color: #0d47a1;
+        }
+        .telegram-box h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            color: #0d47a1;
+        }
+        .telegram-connected {
+            background: linear-gradient(135deg, #c8e6c9, #a5d6a7);
+            color: #1b5e20;
+        }
+        .telegram-connected h3 {
+            color: #1b5e20;
+        }
+        .telegram-btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #229ED9;
+            color: white;
+            text-decoration: none;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 1em;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+        .telegram-btn:hover {
+            background: #1a7eb0;
+        }
+        .telegram-disconnect {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #ef5350;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+    </style>
 </head>
 <body class="theme-{{ user.theme }}">
     <div class="container">
@@ -56,6 +105,30 @@
 
             <button type="submit" class="btn-primary">Сохранить</button>
         </form>
+
+        <!-- Telegram -->
+        <div class="telegram-box {% if user.telegram_id %}telegram-connected{% endif %}">
+            <h3>📲 {% if user.telegram_id %}Telegram подключён{% else %}Напоминания в Telegram{% endif %}</h3>
+            {% if user.telegram_id %}
+                <p>Каждое утро в 8:00 я присылаю задачи на день в Telegram.</p>
+                <form method="POST" action="/telegram/disconnect" style="display:inline;">
+                    <button type="submit" class="telegram-disconnect"
+                            onclick="return confirm('Отключить напоминания в Telegram?');">
+                        Отключить
+                    </button>
+                </form>
+            {% else %}
+                <p>Получай напоминания о поливе и подкормке прямо в Telegram — каждое утро в 8:00.</p>
+                {% if telegram_bot_username %}
+                    <a href="https://t.me/{{ telegram_bot_username }}?start={{ user.username }}"
+                       target="_blank" class="telegram-btn">
+                        🔗 Подключить Telegram
+                    </a>
+                {% else %}
+                    <p style="font-size:0.85em; opacity:0.7;">Бот пока не настроен. Обратись к администратору.</p>
+                {% endif %}
+            {% endif %}
+        </div>
 
         <div style="text-align: center; margin-top: 20px;">
             <a href="https://yoomoney.ru/to/4100119622077431" target="_blank" style="display: inline-block; padding: 12px 20px; background: var(--primary); color: white; text-decoration: none; border-radius: 12px; font-weight: 600;">💖 Поддержать проект</a>
