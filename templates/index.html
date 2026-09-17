@@ -199,7 +199,7 @@
         <!-- Погода -->
         {% if weather %}
         <div class="weather-box">
-            <div class="weather-title">☁️ Погода{% if user.city %} в {{ user.city }}{% endif %}</div>
+            <div class="weather-title">☁️ Погода{% if city_in_case %} в {{ city_in_case }}{% endif %}</div>
             <div class="weather-days">
                 {% for day in weather %}
                 <div class="weather-day">
