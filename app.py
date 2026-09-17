@@ -8,6 +8,12 @@ from collections import defaultdict
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    print("[IMG] HEIC поддержка включена", flush=True)
+except Exception as e:
+    print(f"[IMG] HEIC поддержка недоступна: {e}", flush=True)
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -720,12 +726,24 @@ def upload_plant_photo(plant_id):
         flash('Файл не выбран', 'error')
         return redirect(url_for('plant_detail', plant_id=plant_id))
     try:
-        img = Image.open(file.stream)
-        # Приводим к RGB (чтобы JPEG точно сохранился)
-        if img.mode in ('RGBA', 'P', 'LA'):
+        # Читаем все байты в память и оборачиваем в BytesIO —
+        # так указатель точно в начале, и Pillow прочитает файл корректно.
+        raw = file.read()
+        if not raw:
+            flash('Файл пустой', 'error')
+            return redirect(url_for('plant_detail', plant_id=plant_id))
+
+        stream = io.BytesIO(raw)
+        img = Image.open(stream)
+        img.load()  # форсируем чтение пикселей
+
+        # Приводим к RGB (HEIC, PNG с прозрачностью, палитра — всё сконвертируется)
+        if img.mode != 'RGB':
             img = img.convert('RGB')
+
         # Ресайз: длинная сторона — максимум 800px
         img.thumbnail((800, 800))
+
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=80, optimize=True)
         b64 = base64.b64encode(buf.getvalue()).decode('ascii')
@@ -733,6 +751,7 @@ def upload_plant_photo(plant_id):
                 (b64, plant_id, user['id']))
         flash('Фото загружено 🌿', 'success')
     except Exception as e:
+        print(f"[IMG] Ошибка загрузки: {e}", flush=True)
         flash(f'Ошибка загрузки фото: {e}', 'error')
     return redirect(url_for('plant_detail', plant_id=plant_id))
 
