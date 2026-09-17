@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ plant.name }} — Мой сад</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#4caf50">
+    <style>
+        .plant-hero {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .plant-photo {
+            width: 100%;
+            max-width: 400px;
+            border-radius: 16px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            margin-bottom: 15px;
+        }
+        .photo-placeholder {
+            width: 100%;
+            max-width: 400px;
+            height: 240px;
+            border-radius: 16px;
+            background: var(--light-bg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 4em;
+            color: var(--primary);
+            margin: 0 auto 15px;
+        }
+        .photo-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .section-box {
+            background: var(--light-bg);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .section-box h3 {
+            margin-top: 0;
+            color: var(--primary-dark);
+        }
+        .log-item {
+            background: rgba(255,255,255,0.7);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 8px;
+        }
+        .log-date {
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+        .log-note {
+            margin-top: 4px;
+        }
+        .plant-meta-line {
+            font-size: 0.9em;
+            margin: 4px 0;
+        }
+        textarea {
+            width: 100%;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            font-family: inherit;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body class="theme-{{ user.theme }}">
+    <div class="container">
+        <h1>{{ plant.name }}</h1>
+        <a href="/garden" class="back-link">← К моему саду</a>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="ai-tip" style="background: {% if category == 'success' %}#c8e6c9{% else %}#ffcdd2{% endif %}; color: {% if category == 'success' %}#1b5e20{% else %}#b71c1c{% endif %};">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <!-- Фото -->
+        <div class="plant-hero">
+            {% if plant.photo %}
+                <img src="data:image/jpeg;base64,{{ plant.photo }}" alt="{{ plant.name }}" class="plant-photo">
+            {% else %}
+                <div class="photo-placeholder">🌱</div>
+            {% endif %}
+
+            <div class="photo-actions">
+                <form method="POST" action="/plant/{{ plant.id }}/photo" enctype="multipart/form-data" style="display:inline;">
+                    <label class="action-btn" style="cursor:pointer;">
+                        📷 {% if plant.photo %}Обновить фото{% else %}Загрузить фото{% endif %}
+                        <input type="file" name="photo" accept="image/*" required
+                               style="display:none;" onchange="this.form.submit();">
+                    </label>
+                </form>
+                {% if plant.photo %}
+                <form method="POST" action="/plant/{{ plant.id }}/photo/delete" style="display:inline;"
+                      onsubmit="return confirm('Удалить фото?');">
+                    <button type="submit" class="action-btn danger">🗑 Удалить фото</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Метаданные -->
+        <div class="section-box">
+            <h3>ℹ️ Информация</h3>
+            <div class="plant-meta-line">📍 Где растёт: {{ plant.location or '—' }}</div>
+            <div class="plant-meta-line">🌱 Посажено: {{ plant.planted_date }}</div>
+            <div class="plant-meta-line">💧 Последний полив: {{ plant.last_watered or 'ещё не поливали' }}</div>
+            <div class="plant-meta-line">🧪 Последняя подкормка: {{ plant.last_fed or 'ещё не подкармливали' }}</div>
+        </div>
+
+        {% if care_tips.get(plant.name) %}
+        <div class="ai-tip">💡 {{ care_tips[plant.name] }}</div>
+        {% endif %}
+
+        <!-- Быстрые действия -->
+        <div class="section-box">
+            <h3>⚡ Действия</h3>
+            <div class="plant-actions" style="display:flex; gap:8px; flex-wrap:wrap;">
+                <form method="POST" action="/plant/{{ plant.id }}/water" style="display:inline;">
+                    <button type="submit" class="action-btn">💧 Полить</button>
+                </form>
+                <form method="POST" action="/plant/{{ plant.id }}/feed" style="display:inline;">
+                    <button type="submit" class="action-btn">🧪 Подкормить</button>
+                </form>
+                <form method="POST" action="/plant/{{ plant.id }}/transplant" style="display:inline;">
+                    <button type="submit" class="action-btn">🌱 Пересадить</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Расписание -->
+        <div class="section-box">
+            <h3>⏰ Расписание</h3>
+            <form method="POST" action="/plant/{{ plant.id }}/schedule">
+                <div style="display:flex; gap:15px; flex-wrap:wrap;">
+                    <label style="display:flex; flex-direction:column; font-size:0.9em;">
+                        Полив (дней):
+                        <input type="number" name="water_interval" min="1"
+                               value="{{ plant.water_interval_override or plant.watering_frequency }}"
+                               style="padding:6px; border-radius:6px; border:1px solid var(--border); width:80px;">
+                    </label>
+                    <label style="display:flex; flex-direction:column; font-size:0.9em;">
+                        Подкормка (дней):
+                        <input type="number" name="feed_interval" min="1"
+                               value="{{ plant.feed_interval_override or plant.feeding_frequency }}"
+                               style="padding:6px; border-radius:6px; border:1px solid var(--border); width:80px;">
+                    </label>
+                </div>
+                <button type="submit" class="btn-primary" style="margin-top:12px;">💾 Сохранить расписание</button>
+            </form>
+        </div>
+
+        <!-- Заметки -->
+        <div class="section-box">
+            <h3>📝 Заметки</h3>
+            <form method="POST" action="/plant/{{ plant.id }}/notes">
+                <textarea name="notes" rows="5" placeholder="Например: желтеют листья, появились первые цветы...">{{ plant.notes or '' }}</textarea>
+                <button type="submit" class="btn-primary" style="margin-top:10px;">💾 Сохранить заметки</button>
+            </form>
+        </div>
+
+        <!-- История -->
+        <div class="section-box">
+            <h3>📜 История</h3>
+            {% if logs %}
+                {% for log in logs %}
+                <div class="log-item">
+                    <div class="log-date">{{ log.action_date }} · {{ log.action }}</div>
+                    {% if log.note %}<div class="log-note">{{ log.note }}</div>{% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p style="opacity:0.7;">Пока ничего не записано.</p>
+            {% endif %}
+        </div>
+
+        <!-- Удаление -->
+        <form method="POST" action="/plant/{{ plant.id }}/delete" style="text-align:center; margin-top:20px;"
+              onsubmit="return confirm('Удалить растение? Все данные о нём исчезнут.');">
+            <button type="submit" class="action-btn danger">🗑 Удалить растение</button>
+        </form>
+
+        <nav class="bottom-nav">
+            <a href="/dashboard" class="nav-btn" title="Главная">🏠</a>
+            <a href="/garden" class="nav-btn active" title="Мой сад">🌱</a>
+            <a href="/diary" class="nav-btn" title="Дневник">📝</a>
+            <a href="/calendar" class="nav-btn" title="Календарь">📅</a>
+            <a href="/profile" class="nav-btn" title="Профиль">👤</a>
+            <a href="/logout" class="nav-btn" title="Выйти" onclick="return confirm('Вы точно хотите выйти?');">🚪</a>
+        </nav>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+        }
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    </script>
+</body>
+</html>
