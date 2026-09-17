@@ -338,6 +338,66 @@ def geocode_city(city):
         print(f"[GEOCODE] Ошибка: {e}", flush=True)
     return None, None
 
+def _decline_simple(word):
+    """Склоняет одно слово в предложный падеж: Москва → Москве, Казань → Казани."""
+    if not word or len(word) < 2:
+        return word
+    last = word[-1].lower()
+
+    # Не склоняются: Сочи, Токио, Осло, Баку, Хельсинки
+    if last in ('о', 'е', 'и', 'у', 'ю', 'ы', 'э'):
+        return word
+
+    # -ия → -ии (напр. Малайзия → Малайзии)
+    if word[-2:].lower() == 'ия':
+        return word[:-1] + 'и'
+
+    # -ья → -ье (Марья → Марье)
+    if word[-2:].lower() == 'ья':
+        return word[:-1] + 'е'
+
+    # -а → -е (Москва → Москве, Тула → Туле)
+    if last == 'а':
+        return word[:-1] + 'е'
+
+    # -я → -е (редко, но пусть будет)
+    if last == 'я':
+        return word[:-1] + 'е'
+
+    # -ь → -и (Казань → Казани, Тверь → Твери)
+    if last == 'ь':
+        return word[:-1] + 'и'
+
+    # Согласная → +е (Новосибирск → Новосибирске, Воронеж → Воронеже)
+    return word + 'е'
+
+
+def city_to_prepositional(city):
+    """Склоняет название города в предложный падеж: 'Москва' → 'Москве'."""
+    if not city:
+        return city
+    c = city.strip()
+    if len(c) < 2:
+        return c
+
+    # Составные через дефис: Санкт-Петербург → Санкт-Петербурге
+    if '-' in c:
+        parts = c.split('-')
+        # Если есть строчные части типа «на-Дону» — не трогаем (сложно)
+        if any(p and p[0].islower() for p in parts):
+            return c
+        parts[-1] = _decline_simple(parts[-1])
+        return '-'.join(parts)
+
+    # Названия с пробелом: склоняем последнее слово
+    if ' ' in c:
+        parts = c.split(' ')
+        parts[-1] = _decline_simple(parts[-1])
+        return ' '.join(parts)
+
+    return _decline_simple(c)
+
+    
 def get_weather_forecast(lat, lon):
     """Возвращает список из 3 дней прогноза с wttr.in (бесплатно, без ключа)."""
     try:
@@ -596,8 +656,11 @@ def dashboard():
         if not weather:
             print(f"[WEATHER] Не удалось получить прогноз для lat={user['lat']}, lon={user['lon']}", flush=True)
 
+        city_in_case = city_to_prepositional(user['city']) if user['city'] else None
+
     return render_template('index.html', user=user, tasks=tasks, plants_count=plants_count,
-                           weather=weather, weather_advice=weather_advice)
+                           weather=weather, weather_advice=weather_advice,
+                           city_in_case=city_in_case)
 
 
 @app.route('/close_install_banner', methods=['POST'])
