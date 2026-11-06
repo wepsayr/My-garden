@@ -1,4 +1,4 @@
-const CACHE_NAME = 'my-garden-cache-v1';
+const CACHE_NAME = 'my-garden-cache-v2';
 const urlsToCache = [
   '/',
   '/static/style.css',
